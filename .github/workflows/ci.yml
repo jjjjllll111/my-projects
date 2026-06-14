@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch
+        required: true
+        default: main
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      NODE_OPTIONS: --max-old-space-size=6144
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: jjjjllll111/omniroute-private
+          ref: ${{ github.event.inputs.ref || 'main' }}
+          token: ${{ secrets.GH_PAT }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund --legacy-peer-deps
+
+      - name: Build plugin
+        run: |
+          cd @omniroute/opencode-plugin
+          npm install --no-audit --no-fund
+          npm run build
+          cd ../..
+
+      - run: npm run build:release
+
+      - name: Pack
+        run: |
+          mkdir -p artifacts
+          npm pack --pack-destination ./artifacts
+
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          TAG=private-latest
+          gh release view $TAG --repo jjjjllll111/omniroute-private || gh release create $TAG --repo jjjjllll111/omniroute-private --title Private-latest --notes Auto-built
+          for tgz in artifacts/*.tgz; do
+            gh release upload $TAG $tgz --repo jjjjllll111/omniroute-private --clobber
+          done
+          echo Done
