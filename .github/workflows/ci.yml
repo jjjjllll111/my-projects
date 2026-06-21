@@ -26,7 +26,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
 
       - run: npm ci --no-audit --no-fund --legacy-peer-deps
@@ -45,7 +45,7 @@ jobs:
           mkdir -p artifacts
           npm pack --pack-destination ./artifacts
 
-      - name: Upload
+      - name: Upload to release
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
@@ -63,7 +63,10 @@ jobs:
         run: |
           set -euo pipefail
           echo "Restarting HF space VVVVY001/OmniRoute..."
-          curl -sS -X POST \
+          RESP=$(curl -sS -w "\n%{http_code}" -X POST \
             -H "Authorization: Bearer $HF_TOKEN" \
-            "https://huggingface.co/api/spaces/VVVVY001/OmniRoute/restart"
+            "https://huggingface.co/api/spaces/VVVVY001/OmniRoute/restart")
+          HTTP_CODE=$(echo "$RESP" | tail -1)
+          BODY=$(echo "$RESP" | head -n -1)
+          echo "HTTP $HTTP_CODE: $BODY"
           echo "HF space restart triggered"
