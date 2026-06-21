@@ -56,3 +56,14 @@ jobs:
             gh release upload $TAG $tgz --repo jjjjllll111/omniroute-private --clobber
           done
           echo Done
+
+      - name: Restart HF Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "Restarting HF space VVVVY001/OmniRoute..."
+          curl -sS -X POST \
+            -H "Authorization: Bearer $HF_TOKEN" \
+            "https://huggingface.co/api/spaces/VVVVY001/OmniRoute/restart"
+          echo "HF space restart triggered"
