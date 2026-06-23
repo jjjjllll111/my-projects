@@ -14,9 +14,9 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
-      NODE_OPTIONS: --max-old-space-size=8192
+      NODE_OPTIONS: --max-old-space-size=12288
     steps:
       - name: Checkout OmniRoute
         uses: actions/checkout@v4
@@ -35,30 +35,55 @@ jobs:
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
-      - name: Build OmniRoute
-        timeout-minutes: 20
+      - name: Build opencode plugin
+        run: |
+          if [ -d "@omniroute/opencode-plugin" ]; then
+            echo "Building opencode plugin..."
+            cd @omniroute/opencode-plugin
+            npm install --no-audit --no-fund
+            npm run build
+            cd ../..
+          else
+            echo "Opencode plugin not found, skipping"
+          fi
+
+      - name: Build OmniRoute (full release build)
+        timeout-minutes: 25
         run: npm run build:release
         env:
           NEXT_DISABLE_SOURCEMAPS: 'true'
+          GENERATE_SOURCEMAP: 'false'
 
-      - name: Verify build
+      - name: Verify build output
         run: |
-          if [ ! -d dist ]; then exit 1; fi
-          du -sh dist/
+          if [ ! -d "dist" ]; then
+            echo "ERROR: dist/ directory not created"
+            exit 1
+          fi
+          echo "Build verification successful"
+          echo "dist/ size: $(du -sh dist/ | cut -f1)"
+          ls -la dist/ | head -20
 
-      - name: Create archive
-        run: cd dist && tar -czf ../omniroute-dist.tar.gz . && cd ..
+      - name: Create distribution archive
+        run: |
+          cd dist
+          tar -czf ../omniroute-dist.tar.gz .
+          cd ..
+          ARCHIVE_SIZE=$(du -h omniroute-dist.tar.gz | cut -f1)
+          echo "Archive created: omniroute-dist.tar.gz (${ARCHIVE_SIZE})"
 
-      - name: Upload to Release
+      - name: Upload to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           TAG=hf-latest
-          gh release view $TAG --repo jjjjllll111/omniroute-private || gh release create $TAG --repo jjjjllll111/omniroute-private --title HF-Latest --notes Auto
+          gh release view $TAG --repo jjjjllll111/omniroute-private || gh release create $TAG --repo jjjjllll111/omniroute-private --title "HF Latest" --notes "Auto-build"
           gh release upload $TAG omniroute-dist.tar.gz --repo jjjjllll111/omniroute-private --clobber
+          echo "Release updated successfully"
 
-      - name: Restart HF Space
+      - name: Restart HuggingFace Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           curl -X POST -H "Authorization: Bearer $HF_TOKEN" https://huggingface.co/api/spaces/VVVVY001/myrouter/restart
+          echo "HF Space restart triggered"
