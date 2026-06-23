@@ -1,4 +1,4 @@
-name: Build OmniRoute for HuggingFace
+﻿name: Build OmniRoute for HuggingFace
 
 on:
   workflow_dispatch:
@@ -14,5 +14,50 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      NODE_OPTIONS: --max-old-space-size=6144
     steps:
-      - run: echo 'Test workflow'
+      - name: Checkout OmniRoute
+        uses: actions/checkout@v4
+        with:
+          repository: jjjjllll111/omniroute-private
+          ref: ${{ github.event.inputs.ref || 'main' }}
+          token: ${{ secrets.GH_PAT }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Build OmniRoute
+        run: npm run build:release
+        env:
+          OMNIROUTE_USE_TURBOPACK: '1'
+          NEXT_DISABLE_SOURCEMAPS: 'true'
+
+      - name: Verify build
+        run: |
+          if [ ! -d dist ]; then exit 1; fi
+          du -sh dist/
+
+      - name: Create archive
+        run: cd dist && tar -czf ../omniroute-dist.tar.gz . && cd ..
+
+      - name: Upload to Release
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          TAG=hf-latest
+          gh release view $TAG --repo jjjjllll111/omniroute-private || gh release create $TAG --repo jjjjllll111/omniroute-private --title HF-Latest --notes Auto
+          gh release upload $TAG omniroute-dist.tar.gz --repo jjjjllll111/omniroute-private --clobber
+
+      - name: Restart HF Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          curl -X POST -H "Authorization: Bearer $HF_TOKEN" https://huggingface.co/api/spaces/VVVVY001/myrouter/restart
