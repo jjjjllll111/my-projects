@@ -1,10 +1,10 @@
-name: CI
+name: Build OmniRoute for HuggingFace
 
 on:
   workflow_dispatch:
     inputs:
       ref:
-        description: Branch
+        description: Branch to build
         required: true
         default: main
 
@@ -17,56 +17,146 @@ jobs:
     env:
       NODE_OPTIONS: --max-old-space-size=6144
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout OmniRoute
+        uses: actions/checkout@v4
         with:
           repository: jjjjllll111/omniroute-private
           ref: ${{ github.event.inputs.ref || 'main' }}
           token: ${{ secrets.GH_PAT }}
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 26
           cache: npm
 
-      - run: npm install --no-audit --no-fund
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
 
-      - name: Build plugin
+      - name: Build opencode plugin
         run: |
-          cd @omniroute/opencode-plugin
-          npm install --no-audit --no-fund
-          npm run build
-          cd ../..
+          if [ -d "@omniroute/opencode-plugin" ]; then
+            echo "Building opencode plugin..."
+            cd @omniroute/opencode-plugin
+            npm install --no-audit --no-fund
+            npm run build
+            cd ../..
+          else
+            echo "Opencode plugin directory not found, skipping"
+          fi
 
-      - run: npm run build:release
+      - name: Build OmniRoute (full release build)
+        run: npm run build:release
+        env:
+          OMNIROUTE_USE_TURBOPACK: '1'
+          NEXT_DISABLE_SOURCEMAPS: 'true'
+          GENERATE_SOURCEMAP: 'false'
 
-      - name: Pack
+      - name: Verify build output
         run: |
-          mkdir -p artifacts
-          npm pack --pack-destination ./artifacts
+          if [ ! -d "dist" ]; then
+            echo "ERROR: dist/ directory not created"
+            exit 1
+          fi
+          echo "Build verification successful"
+          echo "dist/ size: $(du -sh dist/ | cut -f1)"
+          echo "dist/ contents:"
+          ls -la dist/ | head -20
 
-      - name: Upload to release
+      - name: Create distribution archive
+        run: |
+          echo "Creating tarball from dist/..."
+          cd dist
+          tar -czf ../omniroute-dist.tar.gz .
+          cd ..
+          ARCHIVE_SIZE=$(du -h omniroute-dist.tar.gz | cut -f1)
+          echo "Archive created: omniroute-dist.tar.gz (${ARCHIVE_SIZE})"
+
+      - name: Upload to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           set -euo pipefail
-          TAG=private-latest
-          gh release view $TAG --repo jjjjllll111/omniroute-private || gh release create $TAG --repo jjjjllll111/omniroute-private --title Private-latest --notes Auto-built
-          for tgz in artifacts/*.tgz; do
-            gh release upload $TAG $tgz --repo jjjjllll111/omniroute-private --clobber
-          done
-          echo Done
+          
+          TAG=hf-latest
+          COMMIT_SHA=$(git rev-parse --short HEAD)
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          ARCHIVE_SIZE=$(du -h omniroute-dist.tar.gz | cut -f1)
+          
+          echo "Preparing release ${TAG}..."
+          
+          # Create or update release
+          if gh release view $TAG --repo jjjjllll111/omniroute-private >/dev/null 2>&1; then
+            echo "Release ${TAG} exists, updating..."
+          else
+            echo "Creating new release ${TAG}..."
+            gh release create $TAG --repo jjjjllll111/omniroute-private \
+              --title "HuggingFace Space - Latest Build" \
+              --notes "Automated build for HuggingFace Space"
+          fi
+          
+          # Upload archive
+          echo "Uploading omniroute-dist.tar.gz..."
+          gh release upload $TAG omniroute-dist.tar.gz \
+            --repo jjjjllll111/omniroute-private --clobber
+          
+          # Update release notes
+          gh release edit $TAG --repo jjjjllll111/omniroute-private \
+            --notes "## Latest Build for HuggingFace Space
 
-      - name: Restart HF Space
+**Build Time**: ${TIMESTAMP}  
+**Commit**: \`${COMMIT_SHA}\` from \`${{ github.event.inputs.ref || 'main' }}\`  
+**Archive Size**: ${ARCHIVE_SIZE}
+
+### Download
+\`\`\`bash
+wget https://github.com/jjjjllll111/omniroute-private/releases/download/hf-latest/omniroute-dist.tar.gz
+tar -xzf omniroute-dist.tar.gz
+\`\`\`
+
+### Deployment
+HuggingFace Space will automatically download this build on restart.
+
+**Space URL**: https://huggingface.co/spaces/VVVVY001/myrouter"
+          
+          echo "✓ Release updated successfully"
+
+      - name: Restart HuggingFace Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -euo pipefail
-          echo "Restarting HF space VVVVY001/OmniRoute..."
+          
+          SPACE="VVVVY001/myrouter"
+          echo "Triggering restart for HF Space: ${SPACE}..."
+          
           RESP=$(curl -sS -w "\n%{http_code}" -X POST \
-            -H "Authorization: Bearer $HF_TOKEN" \
-            "https://huggingface.co/api/spaces/VVVVY001/OmniRoute/restart")
+            -H "Authorization: Bearer ${HF_TOKEN}" \
+            "https://huggingface.co/api/spaces/${SPACE}/restart")
+          
           HTTP_CODE=$(echo "$RESP" | tail -1)
           BODY=$(echo "$RESP" | head -n -1)
-          echo "HTTP $HTTP_CODE: $BODY"
-          echo "HF space restart triggered"
+          
+          echo "Response code: ${HTTP_CODE}"
+          echo "Response body: ${BODY}"
+          
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "202" ]; then
+            echo "✓ HF Space restart triggered successfully"
+          else
+            echo "⚠ Warning: Unexpected HTTP code ${HTTP_CODE}"
+            echo "Continuing anyway..."
+          fi
+
+      - name: Build summary
+        run: |
+          echo "======================================"
+          echo "Build and Deployment Summary"
+          echo "======================================"
+          echo "✓ Build completed successfully"
+          echo "✓ Archive uploaded to GitHub Release"
+          echo "✓ HuggingFace Space restart triggered"
+          echo ""
+          echo "Release: https://github.com/jjjjllll111/omniroute-private/releases/tag/hf-latest"
+          echo "HF Space: https://huggingface.co/spaces/VVVVY001/myrouter"
+          echo "======================================"
