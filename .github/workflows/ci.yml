@@ -14,8 +14,9 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
-      NODE_OPTIONS: --max-old-space-size=6144
+      NODE_OPTIONS: --max-old-space-size=8192
     steps:
       - name: Checkout OmniRoute
         uses: actions/checkout@v4
@@ -35,9 +36,9 @@ jobs:
         run: npm install --no-audit --no-fund
 
       - name: Build OmniRoute
+        timeout-minutes: 20
         run: npm run build:release
         env:
-          OMNIROUTE_USE_TURBOPACK: '1'
           NEXT_DISABLE_SOURCEMAPS: 'true'
 
       - name: Verify build
