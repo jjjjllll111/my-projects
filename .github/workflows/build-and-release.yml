@@ -55,7 +55,7 @@ jobs:
           echo "name=Build $(date +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.release_info.outputs.tag }}
           name: ${{ steps.release_info.outputs.name }}
