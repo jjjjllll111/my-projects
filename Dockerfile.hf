@@ -1,0 +1,49 @@
+# HuggingFace Space Dockerfile - Runs pre-built artifacts from GitHub Actions
+# Build happens on GitHub Actions to avoid HF Space memory limits
+
+FROM node:26-trixie-slim AS runtime
+
+WORKDIR /app
+
+# Install runtime dependencies
+RUN --mount=type=cache,target=/var/cache/apt,sharing=shared \
+  --mount=type=cache,target=/var/lib/apt/lists,sharing=shared \
+  apt-get update && \
+  apt-get install -y --no-install-recommends \
+    libsecret-1-0 \
+    ca-certificates \
+    rsync && \
+  rm -rf /var/lib/apt/lists/*
+
+# Copy pre-built dist/ directory from GitHub Actions
+# The workflow pushes this after building
+COPY dist/ ./
+
+# Runtime environment
+ENV NODE_ENV=production
+ENV NODE_OPTIONS="--max-old-space-size=8192"
+ENV PORT=7860
+ENV DATA_DIR=/data/omniroute
+ENV MAX_CONCURRENT_REQUESTS=30
+
+# Create data directory for persistence
+RUN mkdir -p /data/omniroute
+
+# Persistent storage sync script (5-minute interval)
+RUN printf '#!/bin/bash\nwhile true; do\n  sleep 300\n  rsync -av --delete /app/data/ /data/omniroute/ 2>/dev/null || true\ndone\n' > /app/sync-data.sh && \
+    chmod +x /app/sync-data.sh
+
+# Set ownership
+RUN chown -R node:node /app /data/omniroute
+
+# Switch to non-root user
+USER node
+
+EXPOSE 7860
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD node -e \"fetch('http://localhost:7860/api/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))\"
+
+# Start sync in background and run the app
+CMD /app/sync-data.sh & exec node dev/run-standalone.mjs

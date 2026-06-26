@@ -1,0 +1,83 @@
+name: Build and Release for HuggingFace
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps --ignore-scripts
+
+      - name: Build project
+        run: npm run build
+        env:
+          NODE_OPTIONS: '--max-old-space-size=6144'
+          OMNIROUTE_USE_TURBOPACK: '1'
+          NEXT_DISABLE_SOURCEMAPS: 'true'
+          GENERATE_SOURCEMAP: 'false'
+
+      - name: Verify build output
+        run: |
+          if [ ! -d "dist" ]; then
+            echo "Error: dist/ directory not found"
+            exit 1
+          fi
+          echo "Build successful"
+          du -sh dist/
+
+      - name: Create build archive
+        run: |
+          cd dist
+          tar -czf ../omniroute-dist.tar.gz .
+          cd ..
+          echo "Archive size: $(du -h omniroute-dist.tar.gz | cut -f1)"
+
+      - name: Generate release info
+        id: release_info
+        run: |
+          echo "tag=build-$(date +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
+          echo "name=Build $(date +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.release_info.outputs.tag }}
+          name: ${{ steps.release_info.outputs.name }}
+          body: |
+            Automated build from commit ${{ github.sha }}
+            
+            **Build Info:**
+            - Commit: `${{ github.sha }}`
+            - Branch: `${{ github.ref_name }}`
+            - Timestamp: `$(date -u)`
+            
+            **To deploy to HF Space:**
+            The HF Space will automatically download this build on next restart.
+          files: omniroute-dist.tar.gz
+          prerelease: false
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Deployment summary
+        run: |
+          echo "Build completed and released"
+          echo "Archive: omniroute-dist.tar.gz"
+          echo "Tag: ${{ steps.release_info.outputs.tag }}"
+          echo "HF Space will auto-download on next restart"

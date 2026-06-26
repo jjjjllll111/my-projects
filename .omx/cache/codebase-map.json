@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "worktreeRoot": "C:\\Users\\Administrator\\Documents\\omniroute-src",
+  "gitDir": "C:\\Users\\Administrator\\Documents\\omniroute-src\\.git",
+  "indexMtimeMs": 1782364243088.2632,
+  "indexSize": 850652,
+  "map": "  src/: instrumentation-node, instrumentation, proxy, server-init\n  src/app/: BootstrapBanner, HomePageClient, HomeProviderTopologySection, TierCoverageWidget, page, page, ActivityFeedClient, ActivityFeed, ActivityItem, DayHeader\n  src/domain/: assessor, categorizer, migration, selfHealer, types, comboResolver, configAudit, connectionModelRules, costRules\n  src/hooks/: useLiveCompression, useLiveDashboard, useProviderBreakerHealth\n  src/i18n/: config, request\n  src/lib/: routingLogger, costAnalysis, healthReport, listCapabilities, providerDiscovery, quotaManagement, smartRouting, streaming, taskExecution, taskManager\n  src/middleware/: promptInjectionGuard\n  src/mitm/: generate, install.stub, install, dataDir, antigravity, claudeCode, codex, copilot, cursor\n  src/models/: index\n  src/scripts/: backfillAggregation\n  src/server/: loginGuard, accessScopes, accessTokenAuth, assertAuth, classify, context, headers, peerStamp, pipeline, clientApi\n  src/shared/: AutoRoutingBanner.test, Auto...",
+  "createdAt": "2026-06-25T05:22:42.500Z"
+}
