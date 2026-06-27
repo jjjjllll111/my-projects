@@ -81,9 +81,29 @@ jobs:
           gh release upload $TAG omniroute-dist.tar.gz --repo jjjjllll111/omniroute-private --clobber
           echo "Release updated successfully"
 
-      - name: Restart HuggingFace Space
+      - name: Wait for release to propagate
+        run: sleep 60
+
+      - name: Restart wangtao318 runner action
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
-          curl -X POST -H "Authorization: Bearer $HF_TOKEN" https://huggingface.co/api/spaces/VVVVY001/myrouter/restart
-          echo "HF Space restart triggered"
+          # 停止当前运行的 action
+          CURRENT_RUN=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/wangtao318/runner/actions/runs?status=in_progress&per_page=1" | \
+            jq -r '.workflow_runs[0].id')
+
+          if [ "$CURRENT_RUN" != "null" ] && [ -n "$CURRENT_RUN" ]; then
+            curl -X POST -H "Authorization: token $GH_TOKEN" \
+              "https://api.github.com/repos/wangtao318/runner/actions/runs/$CURRENT_RUN/cancel"
+            echo "Cancelled run: $CURRENT_RUN"
+            sleep 10
+          fi
+
+          # 触发新的 runner action
+          curl -X POST -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/wangtao318/runner/actions/workflows/runner-run.yml/dispatches" \
+            -d '{"ref":"main"}'
+
+          echo "✓ Triggered new wangtao318/runner action"
