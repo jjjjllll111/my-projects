@@ -86,7 +86,7 @@ jobs:
 
       - name: Restart wangtao318 runner action
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
+          GH_TOKEN: ${{ secrets.WANGTAO318_GH_TOKEN }}
         run: |
           # 停止当前运行的 action
           CURRENT_RUN=$(curl -s -H "Authorization: token $GH_TOKEN" \
