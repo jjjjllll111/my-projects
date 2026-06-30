@@ -1,0 +1,90 @@
+name: Build and Publish jjjj-9router to npm
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch to build from 9router-private
+        required: true
+        default: master
+      npm_tag:
+        description: npm dist-tag (latest, beta, etc)
+        required: false
+        default: latest
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      NODE_OPTIONS: --max-old-space-size=12288
+    steps:
+      - name: Checkout 9router from private repository
+        uses: actions/checkout@v4
+        with:
+          repository: jjjjllll111/9router-private
+          ref: ${{ github.event.inputs.ref || 'master' }}
+          token: ${{ secrets.GH_PAT }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install root dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Update CLI package name to jjjj-9router
+        run: |
+          cd cli
+          cp package.json package.json.bak
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.name = 'jjjj-9router';
+            pkg.private = false;
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          echo "✓ Updated package name to jjjj-9router"
+          grep -A2 '"name"' package.json
+
+      - name: Build CLI
+        run: |
+          cd cli
+          npm run build
+          echo "✓ CLI build completed"
+          ls -la app/ | head -10
+
+      - name: Verify build output
+        run: |
+          if [ ! -d "cli/app" ]; then
+            echo "ERROR: cli/app/ directory not created"
+            exit 1
+          fi
+          echo "✓ Build verification successful"
+          echo "cli/app/ size: $(du -sh cli/app/ | cut -f1)"
+
+      - name: Publish to npm
+        run: |
+          cd cli
+          NPM_TAG="${{ github.event.inputs.npm_tag || 'latest' }}"
+          echo "Publishing jjjj-9router@$(node -p 'require(\"./package.json\").version') with tag: $NPM_TAG"
+          npm publish --tag $NPM_TAG --access public
+          echo "✓ Published successfully"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Restore original package.json
+        if: always()
+        run: |
+          cd cli
+          if [ -f package.json.bak ]; then
+            mv package.json.bak package.json
+            echo "✓ Restored original package.json"
+          fi
