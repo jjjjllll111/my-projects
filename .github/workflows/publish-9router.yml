@@ -1,4 +1,4 @@
-name: Build and Publish jjjj-9router to npm
+name: Build 9router CLI and Upload to Release
 
 on:
   workflow_dispatch:
@@ -7,16 +7,12 @@ on:
         description: Branch to build from 9router-private
         required: true
         default: master
-      npm_tag:
-        description: npm dist-tag (latest, beta, etc)
-        required: false
-        default: latest
 
 permissions:
   contents: read
 
 jobs:
-  build-and-publish:
+  build-and-release:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
@@ -35,31 +31,15 @@ jobs:
         with:
           node-version: 26
           cache: npm
-          registry-url: 'https://registry.npmjs.org'
 
       - name: Install root dependencies
         run: npm install --no-audit --no-fund
-
-      - name: Update CLI package name to jjjj-9router
-        run: |
-          cd cli
-          cp package.json package.json.bak
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            pkg.name = 'jjjj-9router';
-            pkg.private = false;
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
-          echo "✓ Updated package name to jjjj-9router"
-          grep -A2 '"name"' package.json
 
       - name: Build CLI
         run: |
           cd cli
           npm run build
           echo "✓ CLI build completed"
-          ls -la app/ | head -10
 
       - name: Verify build output
         run: |
@@ -69,22 +49,30 @@ jobs:
           fi
           echo "✓ Build verification successful"
           echo "cli/app/ size: $(du -sh cli/app/ | cut -f1)"
+          ls -la cli/app/ | head -15
 
-      - name: Publish to npm
+      - name: Create distribution archive
         run: |
           cd cli
-          NPM_TAG="${{ github.event.inputs.npm_tag || 'latest' }}"
-          echo "Publishing jjjj-9router@$(node -p 'require(\"./package.json\").version') with tag: $NPM_TAG"
-          npm publish --tag $NPM_TAG --access public
-          echo "✓ Published successfully"
+          tar -czf ../9router-cli.tar.gz app cli.js hooks src README.md LICENSE 2>/dev/null || tar -czf ../9router-cli.tar.gz app cli.js hooks src
+          cd ..
+          ARCHIVE_SIZE=$(du -h 9router-cli.tar.gz | cut -f1)
+          echo "✓ Archive created: 9router-cli.tar.gz (${ARCHIVE_SIZE})"
+
+      - name: Upload to GitHub Release
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Restore original package.json
-        if: always()
+          GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
-          cd cli
-          if [ -f package.json.bak ]; then
-            mv package.json.bak package.json
-            echo "✓ Restored original package.json"
-          fi
+          TAG=cli-latest
+          REPO=jjjjllll111/9router-private
+
+          # Create or verify release exists
+          gh release view $TAG --repo $REPO || \
+            gh release create $TAG --repo $REPO \
+              --title "9Router CLI Latest" \
+              --notes "Auto-build from ${{ github.event.inputs.ref || 'master' }} branch"
+
+          # Upload and overwrite existing archive
+          gh release upload $TAG 9router-cli.tar.gz --repo $REPO --clobber
+
+          echo "✓ Release updated successfully at https://github.com/$REPO/releases/tag/$TAG"
