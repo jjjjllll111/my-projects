@@ -45,6 +45,22 @@ jobs:
           npm run build
           echo "✓ CLI build completed"
 
+      - name: Bundle engine deps and models into cli/app
+        run: |
+          set -euo pipefail
+          node scripts/bundle-engine-deps.mjs cli/app-engine-deps --strict
+          node scripts/preload-engine-models.mjs cli/app-engine-models
+          if [ -d "cli/app-engine-deps/node_modules" ]; then
+            mkdir -p cli/app/node_modules
+            cp -r cli/app-engine-deps/node_modules/. cli/app/node_modules/
+          fi
+          if [ -d "cli/app-engine-models" ]; then
+            mkdir -p cli/app/engine-models
+            cp -r cli/app-engine-models/. cli/app/engine-models/
+          fi
+          echo "cli/app after bundle: $(du -sh cli/app | cut -f1)"
+          du -sh cli/app/node_modules cli/app/engine-models 2>/dev/null || true
+
       - name: Verify build output
         run: |
           if [ ! -d "cli/app" ]; then
