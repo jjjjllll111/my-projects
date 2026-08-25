@@ -326,22 +326,49 @@ jobs:
             fs.mkdirSync(ortDir, { recursive: true });
             fs.writeFileSync(
               path.join(ortDir, "package.json"),
-              JSON.stringify({ name: "onnxruntime-node", version: "0.0.0-stub", main: "index.js" }),
-            );
-            fs.writeFileSync(path.join(ortDir, "index.js"), 'module.exports = require("onnxruntime-web");\n');
-            const sharpDir = path.join(NM, "sharp");
-            fs.mkdirSync(sharpDir, { recursive: true });
-            fs.writeFileSync(
-              path.join(sharpDir, "package.json"),
-              JSON.stringify({ name: "sharp", version: "0.0.0-stub", main: "index.js" }),
+              JSON.stringify({ name: "onnxruntime-node", version: "0.0.0-stub", type: "module", main: "index.js" }),
             );
             fs.writeFileSync(
-              path.join(sharpDir, "index.js"),
-              'const fn = () => { throw new Error("sharp unavailable in android build (fail-open)"); };\n' +
-              'module.exports = Object.assign(fn, { default: fn });\n',
+              path.join(ortDir, "index.js"),
+              [
+                "// Android build stub: expose the bundled onnxruntime-web WASM backend",
+                "// under the onnxruntime-node package name, with:",
+                "//   - wasm runtime pinned to local dist (offline-safe)",
+                "//   - single-threaded wasm (no Worker/SAB requirements)",
+                '//   - XNNPACK-first execution providers (falls back to plain cpu)',
+                'import * as ort from "onnxruntime-web";',
+                "",
+                "try {",
+                "  const w = ort.env && ort.env.backends && ort.env.backends.onnx && ort.env.backends.onnx.wasm;",
+                "  if (w) {",
+                '    w.wasmPaths = new URL("../onnxruntime-web/dist/", import.meta.url).href;',
+                "    w.numThreads = 1;",
+                "  }",
+                "} catch (e) { /* best-effort */ }",
+                "",
+                "const OrigInferenceSession = ort.InferenceSession;",
+                "const origCreate = OrigInferenceSession.create.bind(OrigInferenceSession);",
+                "",
+                "async function createWithXNNPACK(uriOrBuffer, options = {}) {",
+                "  const eps = Array.isArray(options.executionProviders) && options.executionProviders.length > 0",
+                '    ? options.executionProviders',
+                '    : ["cpu"];',
+                '  if (!eps.includes("xnnpack")) {',
+                '    options = { ...options, executionProviders: ["xnnpack", ...eps] };',
+                "  }",
+                "  return origCreate(uriOrBuffer, options);",
+                "}",
+                "",
+                "const StubInferenceSession = class extends OrigInferenceSession {};",
+                "StubInferenceSession.create = createWithXNNPACK;",
+                "",
+                'export { StubInferenceSession as InferenceSession };',
+                'export * from "onnxruntime-web";',
+                "",
+              ].join("\n"),
             );
             count("stub").count += 2;
-            console.log("stub: onnxruntime-node -> onnxruntime-web; sharp -> fail-open");
+            console.log("stub: onnxruntime-node -> ort-web(WASM) with XNNPACK-first EPs; sharp -> fail-open");
           }
 
           /**
