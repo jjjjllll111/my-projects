@@ -420,7 +420,6 @@ jobs:
             --cross-compiling \
             --openssl-no-asm \
             --with-intl=small-icu \
-            --without-corepack \
             --without-npm
           make -j"$(nproc)" node
           BIN="$PWD/out/Release/node"
