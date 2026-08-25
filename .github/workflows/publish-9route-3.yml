@@ -413,7 +413,6 @@ jobs:
             --dest-os=android \
             --cross-compiling \
             --android-ndk-path="$NDK" \
-            --android-api-level=24 \
             --with-intl=small-icu \
             --without-corepack \
             --without-npm
