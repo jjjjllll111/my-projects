@@ -417,6 +417,35 @@ jobs:
             https://github.com/nodejs/node.git "$RUNNER_TEMP/node-src"
           TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
           cd "$RUNNER_TEMP/node-src"
+          # ── fix upstream omission BEFORE configure ─────────────────────
+          # common.gypi adds the cpufeatures include path for android but
+          # never builds the .c file itself. Patch it so the file is added
+          # as a source for the target toolset. Host toolset will also see
+          # it, but the file is plain C and harmless on x86_64; it simply
+          # provides the missing android_getCpuFeatures symbol for the few
+          # bundled deps (zlib, openssl) that reference it on android.
+          python3 << 'PYEOF'
+          import pathlib
+          p = pathlib.Path("common.gypi")
+          s = p.read_text()
+          old = '''  ['OS == "android"', {
+            'cflags': [ '-fPIC', '-I<(android_ndk_path)/sources/android/cpufeatures' ],
+            'ldflags': [ '-fPIC' ]
+          }],'''
+          new = '''  ['OS == "android"', {
+            'cflags': [ '-fPIC', '-I<(android_ndk_path)/sources/android/cpufeatures' ],
+            'ldflags': [ '-fPIC' ],
+            'sources': ['<(android_ndk_path)/sources/android/cpufeatures/cpu-features.c'],
+          }],'''
+          if old in s:
+              p.write_text(s.replace(old, new))
+              print("patched common.gypi to include cpu-features.c")
+          else:
+              print("WARN: pattern not found in common.gypi")
+              for i, line in enumerate(s.splitlines(), 1):
+                  if 'android' in line.lower():
+                      print(f"{i}: {line}")
+          PYEOF
           # v26+ official recipe — mirrors ./android-configure <ndk> 24 arm64:
           #   * NDK path is passed via GYP_DEFINES (android_ndk_path), toolchain
           #     via CC/CXX env. configure itself accepts NEITHER as a flag and
