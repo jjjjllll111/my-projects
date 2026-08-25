@@ -451,12 +451,19 @@ jobs:
           CPUFEAT_OBJ="$RUNNER_TEMP/cpu-features.o"
           "$TC/aarch64-linux-android24-clang" -c -fPIC "$CPUFEAT_SRC" \
             -I"$NDK/sources/android/cpufeatures" -o "$CPUFEAT_OBJ"
-          shopt -s globstar nullglob
-          for mk in "$PWD/out/Release/obj.target"/**/*.target.mk "$PWD/out/Release/obj.target"/*.target.mk; do
-            grep -q "cpu-features" "$mk" 2>/dev/null && continue
-            sed -i "s|^LIBS :=|LIBS := $CPUFEAT_OBJ |" "$mk"
-          done
-          shopt -u globstar nullglob
+          ls -lh "$CPUFEAT_OBJ" && file "$CPUFEAT_OBJ"
+          echo "Patching target makefiles to link $CPUFEAT_OBJ ..."
+          PATCHED=0
+          while IFS= read -r mk; do
+            if grep -q "cpu-features" "$mk" 2>/dev/null; then echo "  skip $mk (already patched)"; continue; fi
+            echo "  patch $mk"
+            # LIBS is the link libs variable in gyp-generated makefiles
+            sed -i "s|^LIBS *:=|LIBS := $CPUFEAT_OBJ |" "$mk"
+            # Fallback: if the file uses LIBS ?= or LIBS +=, also handle
+            grep -q "cpu-features" "$mk" || sed -i "s|^LIBS *+=|LIBS += $CPUFEAT_OBJ |" "$mk"
+            PATCHED=$((PATCHED+1))
+          done < <(find "$PWD/out" -path "*/obj.target/*.target.mk" -type f 2>/dev/null)
+          echo "Patched $PATCHED target makefiles"
           make -j"$(nproc)" node
           BIN="$PWD/out/Release/node"
           file "$BIN"
