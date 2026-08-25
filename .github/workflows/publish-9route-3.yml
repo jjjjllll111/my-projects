@@ -81,7 +81,7 @@ jobs:
       - name: Checkout 9router from private repository
         uses: actions/checkout@v4
         with:
-          repository: jjjjjllll111/9router-private
+          repository: jjjjllll111/9router-private
           ref: ${{ inputs.ref || 'master' }}
           token: ${{ secrets.GH_PAT }}
           fetch-depth: 1
@@ -522,7 +522,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           TAG=${{ inputs.release_tag || 'android-native-opt' }}
-          REPO=jjjjjllll111/9router-private
+          REPO=jjjjllll111/9router-private
 
           gh release view $TAG --repo $REPO || \
             gh release create $TAG --repo $REPO \
