@@ -9,19 +9,15 @@
 #         │                               e.g. drop into jniLibs/arm64-v8a/ — the
 #         │                               lib*.so name is what keeps it executable
 #         │                               under Android 10+ W^X via nativeLibraryDir)
-#         ├── lib/arm64-v8a/*.so          (Termux-fallback mode only) shared deps
 #         ├── app/                        compiled+pruned server bundle (server.js,
 #         │                               custom-server.js, .next-cli-build/,
 #         │                               node_modules/, public/, src/)
 #         └── start.sh                    reference launcher (works in Termux as-is;
 #                                         same exec recipe inside your APK)
 #
-# How the bionic node binary is obtained ("attempt" semantics):
-#   Path A (preferred): cross-compile Node.js from source with the runner's
-#     preinstalled Android NDK (--dest-os=android --dest-cpu=arm64).
-#   Path B (fallback): extract the Termux `nodejs` .deb (bionic-linked) plus its
-#     shared-library deps (openssl/zlib/c-ares/icu/nghttp2).
-#   Verified either way: ELF AArch64 + NO glibc markers (libc.so.6/GLIBC_*).
+# Bionic node binary: cross-compiled from Node.js source with the runner's
+#   preinstalled Android NDK (--dest-os=android --dest-cpu=arm64).
+#   Verified: ELF AArch64 + NO glibc markers (libc.so.6/GLIBC_*).
 #
 # App bundle policy (same optimizer as v2, plus android stripping):
 #   - dev-junk/source-maps pruned from node_modules ONLY; engine dependency
@@ -47,15 +43,11 @@ on:
         required: true
         default: android-native-opt
       node_version:
-        description: Node.js source tag for the NDK build attempt
+        description: Node.js source tag for the NDK build
         required: true
         default: v26.7.0
       bake_models:
         description: Bake llmlingua model weights into the bundle (+130MB)
-        required: false
-        default: "false"
-      skip_source_build:
-        description: Skip NDK source build, go straight to Termux extraction
         required: false
         default: "false"
 
@@ -388,11 +380,8 @@ jobs:
           OPT_EOF
           OPT_STRIP_GLIBC_NATIVE=1 node "$RUNNER_TEMP/optimize-bundle.mjs" cli/app
 
-      # ---- PATH A: cross-compile node from source against bionic (attempt) ----
-      - name: Attempt NDK source build of Node.js
-        id: nodesrc
-        if: ${{ inputs.skip_source_build != 'true' }}
-        continue-on-error: true
+      # ---- cross-compile node from source against bionic ----
+      - name: NDK source build of Node.js
         timeout-minutes: 75
         run: |
           set -euo pipefail
@@ -428,51 +417,6 @@ jobs:
           cp "$BIN" "$RUNNER_TEMP/payload/lib/arm64-v8a/libnode.so"
           chmod +x "$RUNNER_TEMP/payload/lib/arm64-v8a/libnode.so"
           "$TC/llvm-strip" "$RUNNER_TEMP/payload/lib/arm64-v8a/libnode.so" || true
-          echo "mode=source" >> "$GITHUB_OUTPUT"
-
-      # ---- PATH B: Termux bionic node extraction (fallback) ----
-      - name: Fallback — extract bionic node from Termux packages
-        if: ${{ steps.nodesrc.outcome == 'skipped' || steps.nodesrc.outcome == 'failure' }}
-        id: nodetermux
-        run: |
-          set -euo pipefail
-          STAGE="$RUNNER_TEMP/payload/lib/arm64-v8a"
-          mkdir -p "$STAGE"
-          IDXFILE="$RUNNER_TEMP/pkgindex.txt"
-          curl -fsSL https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages -o "$IDXFILE"
-          # NOTE: no `cmd | awk` pipelines here — awk early-exits on first match,
-          # the writer gets SIGPIPE, and pipefail turns that into a bogus step
-          # failure (exact bug seen in CI). awk reads a file instead.
-          pkg_file () {
-            awk -v RS= -v FS='\n' -v pat="^Package: $1\$" \
-              '$1 ~ pat { for (i=1;i<=NF;i++) if ($i ~ /^Filename:/) { sub(/^Filename: /,"",$i); print $i; exit } }' \
-              "$IDXFILE"
-          }
-          NF=$(pkg_file nodejs)
-          [ -z "$NF" ] && { echo "FATAL: termux nodejs package not found"; exit 1; }
-          curl -fsSL "https://packages.termux.dev/apt/termux-main/$NF" -o "$RUNNER_TEMP/node.deb"
-          mkdir -p "$RUNNER_TEMP/nex"
-          ( cd "$RUNNER_TEMP/nex" && ar x "$RUNNER_TEMP/node.deb" && tar -xf data.tar.* )
-          cp "$RUNNER_TEMP/nex"/data/data/com.termux/files/usr/bin/node "$STAGE/libnode.so"
-          chmod +x "$STAGE/libnode.so"
-          fetch_deb () { # $1=pkg-name
-            local F
-            F=$(pkg_file "$1")
-            [ -z "$F" ] && { echo "  (package $1 not found in repo index)"; return 0; }
-            echo "  fetching $1 ..."
-            curl -fsSL "https://packages.termux.dev/apt/termux-main/$F" -o "$RUNNER_TEMP/p.deb"
-            mkdir -p "$RUNNER_TEMP/pex"
-            ( cd "$RUNNER_TEMP/pex" && rm -rf data.tar.* debian-binary control.tar.* && \
-              ar x "$RUNNER_TEMP/p.deb" && tar -xf data.tar.* )
-            cp "$RUNNER_TEMP/pex"/data/data/com.termux/files/usr/lib/*.so* "$STAGE/" 2>/dev/null || true
-          }
-          # dependency libs (extra unused ones are harmless)
-          for P in libopenssl zlib c-ares libicu libnghttp2; do
-            fetch_deb "$P"
-          done
-          # never ship bionic's own runtime libs
-          rm -f "$STAGE"/libc.so* "$STAGE"/libdl.so* "$STAGE"/libm.so*
-          echo "mode=termux" >> "$GITHUB_OUTPUT"
 
       - name: Verify node binary is bionic-linked arm64
         run: |
@@ -523,8 +467,8 @@ jobs:
           exec "$DIR/lib/arm64-v8a/libnode.so" "$DIR/app/server.js"
           START_EOF
           chmod +x "$P/start.sh"
-          (cd "$RUNNER_TEMP" && tar -czf "9router-$VERSION-android-native-arm64.tar.gz" payload)
-          mv "9router-$VERSION-android-native-arm64.tar.gz" "$RUNNER_TEMP/artifact.tar.gz"
+          # -C so the archive root is payload/ ; write straight to the final path
+          tar -czf "$RUNNER_TEMP/artifact.tar.gz" -C "$RUNNER_TEMP" payload
           ls -lh "$RUNNER_TEMP/artifact.tar.gz"
           du -sh "$P/app" "$P/lib"
           echo "PAYLOAD_TAR=$RUNNER_TEMP/artifact.tar.gz" >> "$GITHUB_ENV"
@@ -539,7 +483,7 @@ jobs:
           gh release view $TAG --repo $REPO || \
             gh release create $TAG --repo $REPO \
               --title "9Router Bionic-Native (Android arm64)" \
-              --notes "Compiled pieces only (no APK): bionic-linked node ($( [ -n "${{ steps.nodesrc.outputs.mode }}" ] && echo "NDK source build" || echo "Termux extraction" )) + pruned server bundle + reference start.sh. Package your own APK — keep the binary named lib*.so under jniLibs/arm64-v8a with android:extractNativeLibs=\"true\" so W^X keeps it executable. glibc-only natives stripped (WASM fallback covers them)."
+              --notes "Compiled pieces only (no APK): bionic-linked node (NDK cross-compiled from ${{ inputs.node_version }}) + pruned server bundle + reference start.sh. Package your own APK — keep the binary named lib*.so under jniLibs/arm64-v8a with android:extractNativeLibs=\"true\" so W^X keeps it executable. glibc-only natives stripped (WASM fallback covers them)."
 
           gh release upload $TAG "$PAYLOAD_TAR" --repo $REPO --clobber
           echo "✓ Android-native release updated at https://github.com/$REPO/releases/tag/$TAG"
