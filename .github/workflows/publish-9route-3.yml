@@ -457,12 +457,12 @@ jobs:
           while IFS= read -r mk; do
             if grep -q "cpu-features" "$mk" 2>/dev/null; then echo "  skip $mk (already patched)"; continue; fi
             echo "  patch $mk"
-            # LIBS is the link libs variable in gyp-generated makefiles
-            sed -i "s|^LIBS *:=|LIBS := $CPUFEAT_OBJ |" "$mk"
-            # Fallback: if the file uses LIBS ?= or LIBS +=, also handle
+            sed -i "s|^LIBS :=|LIBS := $CPUFEAT_OBJ |" "$mk"
             grep -q "cpu-features" "$mk" || sed -i "s|^LIBS *+=|LIBS += $CPUFEAT_OBJ |" "$mk"
+            # Fallback: append if pattern didn't match
+            grep -q "cpu-features" "$mk" || echo "LIBS += $CPUFEAT_OBJ" >> "$mk"
             PATCHED=$((PATCHED+1))
-          done < <(find "$PWD/out" -path "*/obj.target/*.target.mk" -type f 2>/dev/null)
+          done < <(find "$PWD/out/Release/obj.target" -name "*.target.mk" -type f 2>/dev/null)
           echo "Patched $PATCHED target makefiles"
           make -j"$(nproc)" node
           BIN="$PWD/out/Release/node"
