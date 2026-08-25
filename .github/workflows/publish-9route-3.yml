@@ -454,6 +454,10 @@ jobs:
           ls -lh "$CPUFEAT_OBJ" && file "$CPUFEAT_OBJ"
           echo "Patching target makefiles to link $CPUFEAT_OBJ ..."
           PATCHED=0
+          echo "--- out/Release/obj.target layout ---"
+          ls -R "$PWD/out/Release/obj.target" 2>&1 | head -30
+          echo "--- find .target.mk files ---"
+          find "$PWD/out" -name "*.target.mk" -type f 2>&1 | head -20
           while IFS= read -r mk; do
             if grep -q "cpu-features" "$mk" 2>/dev/null; then echo "  skip $mk (already patched)"; continue; fi
             echo "  patch $mk"
@@ -462,8 +466,17 @@ jobs:
             # Fallback: append if pattern didn't match
             grep -q "cpu-features" "$mk" || echo "LIBS += $CPUFEAT_OBJ" >> "$mk"
             PATCHED=$((PATCHED+1))
-          done < <(find "$PWD/out/Release/obj.target" -name "*.target.mk" -type f 2>/dev/null)
+          done < <(find "$PWD/out" -name "*.target.mk" -type f 2>/dev/null | grep "obj\.target")
           echo "Patched $PATCHED target makefiles"
+          # Direct patch for the known failing target as ultimate fallback
+          for known in "$PWD/out/Release/obj.target/deps/openssl/openssl-cli.target.mk" "$PWD/out/Release/obj.target/node.target.mk"; do
+            if [ -f "$known" ] && ! grep -q "cpu-features" "$known" 2>/dev/null; then
+              echo "  direct patch $known"
+              echo "LIBS += $CPUFEAT_OBJ" >> "$known"
+              PATCHED=$((PATCHED+1))
+            fi
+          done
+          echo "Total patched (including direct): $PATCHED"
           make -j"$(nproc)" node
           BIN="$PWD/out/Release/node"
           file "$BIN"
