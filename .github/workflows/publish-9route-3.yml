@@ -146,6 +146,7 @@ jobs:
             "js-tiktoken/ranks/o200k_base",
             "smol-toml",
             "safe-regex",
+            "tls-client-node",
           ];
 
           /** glibc-linked native packages useless on bionic; WASM covers them. */

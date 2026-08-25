@@ -162,6 +162,7 @@ jobs:
             "js-tiktoken/ranks/o200k_base",
             "smol-toml",
             "safe-regex",
+            "tls-client-node",
           ];
 
           /** Dev-only directory names — deleted wherever they sit inside node_modules. */
