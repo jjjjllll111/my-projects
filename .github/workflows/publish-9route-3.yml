@@ -440,6 +440,23 @@ jobs:
             --openssl-no-asm \
             --with-intl=small-icu \
             --without-npm
+          # ── upstream workaround: common.gypi adds the cpufeatures include
+          #    path for android but never builds the .c file itself. The
+          #    bundled openssl (armcap) then references android_getCpuFeatures
+          #    at link time:  ld.lld: error: undefined symbol
+          #    Fix: pre-compile the NDK helper and inject it into every TARGET
+          #    link (only obj.target — obj.host stays on glibc and must NOT see
+          #    the arm64 object).
+          CPUFEAT_SRC="$NDK/sources/android/cpufeatures/cpu-features.c"
+          CPUFEAT_OBJ="$RUNNER_TEMP/cpu-features.o"
+          "$TC/aarch64-linux-android24-clang" -c -fPIC "$CPUFEAT_SRC" \
+            -I"$NDK/sources/android/cpufeatures" -o "$CPUFEAT_OBJ"
+          shopt -s globstar nullglob
+          for mk in "$PWD/out/Release/obj.target"/**/*.target.mk "$PWD/out/Release/obj.target"/*.target.mk; do
+            grep -q "cpu-features" "$mk" 2>/dev/null && continue
+            sed -i "s|^LIBS :=|LIBS := $CPUFEAT_OBJ |" "$mk"
+          done
+          shopt -u globstar nullglob
           make -j"$(nproc)" node
           BIN="$PWD/out/Release/node"
           file "$BIN"
