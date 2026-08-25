@@ -109,6 +109,30 @@ jobs:
           npm run build
           echo "✓ CLI build completed"
 
+      # ---- guard: npm silently SKIPS optional deps whose fetch/install fails
+      # ---- transiently (observed as random 600-vs-635 package installs).
+      # ---- Re-fetch explicitly and hard-fail if still absent.
+      - name: Ensure engine deps present (retry transient optional-install gaps)
+        run: |
+          set -euo pipefail
+          PKGS="@huggingface/transformers @atjsh/llmlingua-2 js-tiktoken omniglyph safe-regex smol-toml"
+          MISSING=""
+          for p in $PKGS; do [ -d "node_modules/$p" ] || MISSING="$MISSING $p"; done
+          if [ -n "$MISSING" ]; then
+            echo "::warning::engine deps missing after install:$MISSING"
+            ok=0
+            for attempt in 1 2 3; do
+              echo "::notice::retry attempt $attempt for:$MISSING"
+              if npm install --no-save --no-audit --no-fund $MISSING; then ok=1; break; fi
+              sleep 15
+            done
+            [ "$ok" = "1" ] || { echo "::error::npm install retry failed"; exit 1; }
+          fi
+          for p in $PKGS; do
+            [ -d "node_modules/$p" ] || { echo "::error::$p STILL missing after retries"; exit 1; }
+          done
+          echo "✓ all six engine packages present"
+
       # ---- UNCHANGED from v1: full dependency closure + baked model weights ----
       - name: Bundle engine deps and models into cli/app
         run: |
