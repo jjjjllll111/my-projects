@@ -44,7 +44,7 @@ on:
       bake_models:
         description: Bake llmlingua model weights into the bundle (+130MB)
         required: false
-        default: "false"
+        default: "true"
 
 permissions:
   contents: read
@@ -313,6 +313,37 @@ jobs:
             }
           }
 
+          /**
+           * transformers.node.mjs STATICALLY imports onnxruntime-node and sharp.
+           * After stripping them the whole package fails to import (killing
+           * llmlingua too). Stubs restore importability:
+           *   - onnxruntime-node -> routes to bundled onnxruntime-web (WASM)
+           *   - sharp            -> fail-open throw (image features only)
+           */
+          function writeStubs() {
+            if (!STRIP_GLIBC) return;
+            const ortDir = path.join(NM, "onnxruntime-node");
+            fs.mkdirSync(ortDir, { recursive: true });
+            fs.writeFileSync(
+              path.join(ortDir, "package.json"),
+              JSON.stringify({ name: "onnxruntime-node", version: "0.0.0-stub", main: "index.js" }),
+            );
+            fs.writeFileSync(path.join(ortDir, "index.js"), 'module.exports = require("onnxruntime-web");\n');
+            const sharpDir = path.join(NM, "sharp");
+            fs.mkdirSync(sharpDir, { recursive: true });
+            fs.writeFileSync(
+              path.join(sharpDir, "package.json"),
+              JSON.stringify({ name: "sharp", version: "0.0.0-stub", main: "index.js" }),
+            );
+            fs.writeFileSync(
+              path.join(sharpDir, "index.js"),
+              'const fn = () => { throw new Error("sharp unavailable in android build (fail-open)"); };\n' +
+              'module.exports = Object.assign(fn, { default: fn });\n',
+            );
+            count("stub").count += 2;
+            console.log("stub: onnxruntime-node -> onnxruntime-web; sharp -> fail-open");
+          }
+
           function sweepEmptyDirs(root) {
             const order = [];
             const stack = [root];
@@ -361,6 +392,7 @@ jobs:
           pruneNodeModules();
           sweepAppMaps();
           stripGlibcNatives();
+          writeStubs();
           const emptyDirsRemoved = sweepEmptyDirs(NM);
           const minified = minifyBootstraps();
 
@@ -420,17 +452,24 @@ jobs:
           ( cd "$RUNNER_TEMP/nex" && ar x "$RUNNER_TEMP/node.deb" && tar -xf data.tar.* )
           cp "$RUNNER_TEMP/nex"/data/data/com.termux/files/usr/bin/node "$STAGE/libnode.so"
           chmod +x "$STAGE/libnode.so"
-          fetch_deb () {
+          fetch_deb () {   # $1=pkg-name  $2=extract-dir
             local F
             F=$(pkg_file "$1")
             [ -z "$F" ] && { echo "  (package $1 not found in repo index)"; return 0; }
             echo "  fetching $1 ..."
             curl -fsSL "https://packages.termux.dev/apt/termux-main/$F" -o "$RUNNER_TEMP/p.deb"
-            mkdir -p "$RUNNER_TEMP/pex"
-            ( cd "$RUNNER_TEMP/pex" && rm -rf data.tar.* debian-binary control.tar.* && ar x "$RUNNER_TEMP/p.deb" && tar -xf data.tar.* )
-            cp "$RUNNER_TEMP/pex"/data/data/com.termux/files/usr/lib/*.so* "$STAGE/" 2>/dev/null || true
+            mkdir -p "$2"
+            ( cd "$2" && rm -rf data.tar.* debian-binary control.tar.* && ar x "$RUNNER_TEMP/p.deb" && tar -xf data.tar.* )
           }
-          for P in libopenssl zlib c-ares libicu libnghttp2; do fetch_deb "$P"; done
+          DEPS="libopenssl zlib c-ares libicu libnghttp2"
+          i=0
+          for P in $DEPS; do i=$((i+1)); fetch_deb "$P" "$RUNNER_TEMP/dex$i"; done
+          # -a preserves symlink structure (libicudata.so.78 -> libicudata.so.78.3)
+          # instead of dereferencing into 3 x 33MB physical copies
+          cp -a "$RUNNER_TEMP/nex"/data/data/com.termux/files/usr/lib/. "$STAGE/" 2>/dev/null || true
+          i=0
+          for P in $DEPS; do i=$((i+1)); cp -a "$RUNNER_TEMP/dex$i"/data/data/com.termux/files/usr/lib/. "$STAGE/" 2>/dev/null || true; done
+          # never ship bionic's own runtime libs
           rm -f "$STAGE"/libc.so* "$STAGE"/libdl.so* "$STAGE"/libm.so*
           ls -lh "$STAGE" && file "$STAGE/libnode.so"
 
