@@ -49,7 +49,7 @@ on:
       node_version:
         description: Node.js source tag for the NDK build attempt
         required: true
-        default: v22.14.0
+        default: v26.7.0
       bake_models:
         description: Bake llmlingua model weights into the bundle (+130MB)
         required: false
@@ -404,15 +404,21 @@ jobs:
             https://github.com/nodejs/node.git "$RUNNER_TEMP/node-src"
           TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
           cd "$RUNNER_TEMP/node-src"
-          # node.gyp hard-requires the android_ndk_path variable — supplied via
-          # --android-ndk-path. Configure derives the clang++/ar/ranlib toolchain
-          # from the NDK path itself, so NO manual CC/CXX exports here (they
-          # break host-tool detection under --cross-compiling).
+          # v26+ official recipe — mirrors ./android-configure <ndk> 24 arm64:
+          #   * NDK path is passed via GYP_DEFINES (android_ndk_path), toolchain
+          #     via CC/CXX env. configure itself accepts NEITHER as a flag and
+          #     forwards unknown --flags to gyp where they explode as bogus
+          #     .gyp file names (the two previous CI failures).
+          #   * --openssl-no-asm comes from the official wrapper.
+          export PATH="$PATH:$TC"
+          export CC="$TC/aarch64-linux-android24-clang"
+          export CXX="$TC/aarch64-linux-android24-clang++"
+          export GYP_DEFINES="target_arch=arm64 v8_target_arch=arm64 android_target_arch=arm64 host_os=linux OS=android android_ndk_path=$NDK"
           ./configure \
             --dest-cpu=arm64 \
             --dest-os=android \
             --cross-compiling \
-            --android-ndk-path="$NDK" \
+            --openssl-no-asm \
             --with-intl=small-icu \
             --without-corepack \
             --without-npm
