@@ -403,16 +403,17 @@ jobs:
           git clone --depth 1 --branch "${{ inputs.node_version }}" \
             https://github.com/nodejs/node.git "$RUNNER_TEMP/node-src"
           TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          export CC="$TC/aarch64-linux-android24-clang"
-          export CXX="$TC/aarch64-linux-android24-clang++"
-          export AR="$TC/llvm-ar"
-          export RANLIB="$TC/llvm-ranlib"
-          export STRIP="$TC/llvm-strip"
           cd "$RUNNER_TEMP/node-src"
+          # node.gyp hard-requires the android_ndk_path variable — supplied via
+          # --android-ndk-path. Configure derives the clang++/ar/ranlib toolchain
+          # from the NDK path itself, so NO manual CC/CXX exports here (they
+          # break host-tool detection under --cross-compiling).
           ./configure \
             --dest-cpu=arm64 \
             --dest-os=android \
             --cross-compiling \
+            --android-ndk-path="$NDK" \
+            --android-api-level=24 \
             --with-intl=small-icu \
             --without-corepack \
             --without-npm
@@ -433,9 +434,17 @@ jobs:
           set -euo pipefail
           STAGE="$RUNNER_TEMP/payload/lib/arm64-v8a"
           mkdir -p "$STAGE"
-          IDX=$(curl -fsSL https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages)
-          NF=$(printf '%s\n' "$IDX" | awk -v RS= -v FS='\n' \
-            '$1 ~ /^Package: nodejs$/ { for (i=1;i<=NF;i++) if ($i ~ /^Filename:/) { sub(/^Filename: /,"",$i); print $i; exit } }')
+          IDXFILE="$RUNNER_TEMP/pkgindex.txt"
+          curl -fsSL https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages -o "$IDXFILE"
+          # NOTE: no `cmd | awk` pipelines here — awk early-exits on first match,
+          # the writer gets SIGPIPE, and pipefail turns that into a bogus step
+          # failure (exact bug seen in CI). awk reads a file instead.
+          pkg_file () {
+            awk -v RS= -v FS='\n' -v pat="^Package: $1\$" \
+              '$1 ~ pat { for (i=1;i<=NF;i++) if ($i ~ /^Filename:/) { sub(/^Filename: /,"",$i); print $i; exit } }' \
+              "$IDXFILE"
+          }
+          NF=$(pkg_file nodejs)
           [ -z "$NF" ] && { echo "FATAL: termux nodejs package not found"; exit 1; }
           curl -fsSL "https://packages.termux.dev/apt/termux-main/$NF" -o "$RUNNER_TEMP/node.deb"
           mkdir -p "$RUNNER_TEMP/nex"
@@ -444,8 +453,7 @@ jobs:
           chmod +x "$STAGE/libnode.so"
           fetch_deb () { # $1=pkg-name
             local F
-            F=$(printf '%s\n' "$IDX" | awk -v RS= -v FS='\n' -v pat="^Package: $1\$" \
-              '$1 ~ pat { for (i=1;i<=NF;i++) if ($i ~ /^Filename:/) { sub(/^Filename: /,"",$i); print $i; exit } }')
+            F=$(pkg_file "$1")
             [ -z "$F" ] && { echo "  (package $1 not found in repo index)"; return 0; }
             echo "  fetching $1 ..."
             curl -fsSL "https://packages.termux.dev/apt/termux-main/$F" -o "$RUNNER_TEMP/p.deb"
