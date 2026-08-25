@@ -15,9 +15,8 @@
 #         └── start.sh                    reference launcher (works in Termux as-is;
 #                                         same exec recipe inside your APK)
 #
-# Bionic node binary: cross-compiled from Node.js source with the runner's
-#   preinstalled Android NDK (--dest-os=android --dest-cpu=arm64).
-#   Verified: ELF AArch64 + NO glibc markers (libc.so.6/GLIBC_*).
+# Bionic node binary: extracted from Termux nodejs package (bionic-linked
+#   prebuilt for aarch64, verified ELF AArch64 + NO glibc markers).
 #
 # App bundle policy (same optimizer as v2, plus android stripping):
 #   - dev-junk/source-maps pruned from node_modules ONLY; engine dependency
@@ -42,10 +41,6 @@ on:
         description: Release tag to upload to
         required: true
         default: android-native-opt
-      node_version:
-        description: Node.js source tag for the NDK build
-        required: true
-        default: v26.7.0
       bake_models:
         description: Bake llmlingua model weights into the bundle (+130MB)
         required: false
@@ -404,117 +399,43 @@ jobs:
           OPT_EOF
           OPT_STRIP_GLIBC_NATIVE=1 node "$RUNNER_TEMP/optimize-bundle.mjs" cli/app
 
-      # ---- cross-compile node from source against bionic ----
-      - name: NDK source build of Node.js
-        timeout-minutes: 75
+      # ---- bionic node binary: extracted from Termux packages ----
+      - name: Extract bionic node from Termux packages (primary)
         run: |
           set -euo pipefail
-          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          NDK=$(ls -d "$SDK"/ndk/* 2>/dev/null | sort -V | tail -1 || true)
-          if [ -z "$NDK" ]; then echo "No NDK on runner"; exit 1; fi
-          echo "Using NDK: $NDK"
-          git clone --depth 1 --branch "${{ inputs.node_version }}" \
-            https://github.com/nodejs/node.git "$RUNNER_TEMP/node-src"
-          TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          cd "$RUNNER_TEMP/node-src"
-          # ── fix upstream omission BEFORE configure ─────────────────────
-          # common.gypi adds the cpufeatures include path for android but
-          # never builds the .c file itself. Patch it so the file is added
-          # as a source for the target toolset. Host toolset will also see
-          # it, but the file is plain C and harmless on x86_64; it simply
-          # provides the missing android_getCpuFeatures symbol for the few
-          # bundled deps (zlib, openssl) that reference it on android.
-          python3 << 'PYEOF'
-          import pathlib
-          p = pathlib.Path("common.gypi")
-          s = p.read_text()
-          old = '''  ['OS == "android"', {
-            'cflags': [ '-fPIC', '-I<(android_ndk_path)/sources/android/cpufeatures' ],
-            'ldflags': [ '-fPIC' ]
-          }],'''
-          new = '''  ['OS == "android"', {
-            'cflags': [ '-fPIC', '-I<(android_ndk_path)/sources/android/cpufeatures' ],
-            'ldflags': [ '-fPIC' ],
-            'sources': ['<(android_ndk_path)/sources/android/cpufeatures/cpu-features.c'],
-          }],'''
-          if old in s:
-              p.write_text(s.replace(old, new))
-              print("patched common.gypi to include cpu-features.c")
-          else:
-              print("WARN: pattern not found in common.gypi")
-              for i, line in enumerate(s.splitlines(), 1):
-                  if 'android' in line.lower():
-                      print(f"{i}: {line}")
-          PYEOF
-          # v26+ official recipe — mirrors ./android-configure <ndk> 24 arm64:
-          #   * NDK path is passed via GYP_DEFINES (android_ndk_path), toolchain
-          #     via CC/CXX env. configure itself accepts NEITHER as a flag and
-          #     forwards unknown --flags to gyp where they explode as bogus
-          #     .gyp file names (the two previous CI failures).
-          #   * --openssl-no-asm comes from the official wrapper.
-          export PATH="$PATH:$TC"
-          export CC="$TC/aarch64-linux-android24-clang"
-          export CXX="$TC/aarch64-linux-android24-clang++"
-          # Host tools (mksnapshot, v8_libbase obj.host...) must build with the
-          # SYSTEM toolchain. Without CC_host/CXX_host gyp leaks the android
-          # CC/CXX into host targets -> bionic headers -> 'backtrace_symbols'
-          # undeclared (<execinfo.h> is glibc-only) in stack_trace_posix.cc.
-          export CC_host="$(command -v gcc || command -v cc)"
-          export CXX_host="$(command -v g++ || command -v c++)"
-          export GYP_DEFINES="target_arch=arm64 v8_target_arch=arm64 android_target_arch=arm64 host_os=linux OS=android android_ndk_path=$NDK"
-          ./configure \
-            --dest-cpu=arm64 \
-            --dest-os=android \
-            --cross-compiling \
-            --openssl-no-asm \
-            --with-intl=small-icu \
-            --without-npm
-          # ── upstream workaround: common.gypi adds the cpufeatures include
-          #    path for android but never builds the .c file itself. The
-          #    bundled openssl (armcap) then references android_getCpuFeatures
-          #    at link time:  ld.lld: error: undefined symbol
-          #    Fix: pre-compile the NDK helper and inject it into every TARGET
-          #    link (only obj.target — obj.host stays on glibc and must NOT see
-          #    the arm64 object).
-          CPUFEAT_SRC="$NDK/sources/android/cpufeatures/cpu-features.c"
-          CPUFEAT_OBJ="$RUNNER_TEMP/cpu-features.o"
-          "$TC/aarch64-linux-android24-clang" -c -fPIC "$CPUFEAT_SRC" \
-            -I"$NDK/sources/android/cpufeatures" -o "$CPUFEAT_OBJ"
-          ls -lh "$CPUFEAT_OBJ" && file "$CPUFEAT_OBJ"
-          echo "Patching target makefiles to link $CPUFEAT_OBJ ..."
-          PATCHED=0
-          echo "--- out/Release/obj.target layout ---"
-          ls -R "$PWD/out/Release/obj.target" 2>&1 | head -30
-          echo "--- find .target.mk files ---"
-          find "$PWD/out" -name "*.target.mk" -type f 2>&1 | head -20
-          while IFS= read -r mk; do
-            if grep -q "cpu-features" "$mk" 2>/dev/null; then echo "  skip $mk (already patched)"; continue; fi
-            echo "  patch $mk"
-            sed -i "s|^LIBS :=|LIBS := $CPUFEAT_OBJ |" "$mk"
-            grep -q "cpu-features" "$mk" || sed -i "s|^LIBS *+=|LIBS += $CPUFEAT_OBJ |" "$mk"
-            # Fallback: append if pattern didn't match
-            grep -q "cpu-features" "$mk" || echo "LIBS += $CPUFEAT_OBJ" >> "$mk"
-            PATCHED=$((PATCHED+1))
-          done < <(find "$PWD/out" -name "*.target.mk" -type f 2>/dev/null | grep "obj\.target")
-          echo "Patched $PATCHED target makefiles"
-          # Direct patch for the known failing target as ultimate fallback
-          for known in "$PWD/out/Release/obj.target/deps/openssl/openssl-cli.target.mk" "$PWD/out/Release/obj.target/node.target.mk"; do
-            if [ -f "$known" ] && ! grep -q "cpu-features" "$known" 2>/dev/null; then
-              echo "  direct patch $known"
-              echo "LIBS += $CPUFEAT_OBJ" >> "$known"
-              PATCHED=$((PATCHED+1))
-            fi
-          done
-          echo "Total patched (including direct): $PATCHED"
-          make -j"$(nproc)" node
-          BIN="$PWD/out/Release/node"
-          file "$BIN"
-          mkdir -p "$RUNNER_TEMP/payload/lib/arm64-v8a"
-          cp "$BIN" "$RUNNER_TEMP/payload/lib/arm64-v8a/libnode.so"
-          chmod +x "$RUNNER_TEMP/payload/lib/arm64-v8a/libnode.so"
-          "$TC/llvm-strip" "$RUNNER_TEMP/payload/lib/arm64-v8a/libnode.so" || true
+          STAGE="$RUNNER_TEMP/payload/lib/arm64-v8a"
+          mkdir -p "$STAGE"
+          IDXFILE="$RUNNER_TEMP/pkgindex.txt"
+          curl -fsSL https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages -o "$IDXFILE"
+          pkg_file () {
+            awk -v RS= -v FS='\n' -v pat="^Package: $1\$" \
+              '$1 ~ pat { for (i=1;i<=NF;i++) if ($i ~ /^Filename:/) { sub(/^Filename: /,"",$i); print $i; exit } }' \
+              "$IDXFILE"
+          }
+          NF=$(pkg_file nodejs)
+          [ -z "$NF" ] && { echo "FATAL: termux nodejs package not found"; exit 1; }
+          echo "Fetching nodejs: $NF"
+          curl -fsSL "https://packages.termux.dev/apt/termux-main/$NF" -o "$RUNNER_TEMP/node.deb"
+          mkdir -p "$RUNNER_TEMP/nex"
+          ( cd "$RUNNER_TEMP/nex" && ar x "$RUNNER_TEMP/node.deb" && tar -xf data.tar.* )
+          cp "$RUNNER_TEMP/nex"/data/data/com.termux/files/usr/bin/node "$STAGE/libnode.so"
+          chmod +x "$STAGE/libnode.so"
+          fetch_deb () {
+            local F
+            F=$(pkg_file "$1")
+            [ -z "$F" ] && { echo "  (package $1 not found in repo index)"; return 0; }
+            echo "  fetching $1 ..."
+            curl -fsSL "https://packages.termux.dev/apt/termux-main/$F" -o "$RUNNER_TEMP/p.deb"
+            mkdir -p "$RUNNER_TEMP/pex"
+            ( cd "$RUNNER_TEMP/pex" && rm -rf data.tar.* debian-binary control.tar.* && ar x "$RUNNER_TEMP/p.deb" && tar -xf data.tar.* )
+            cp "$RUNNER_TEMP/pex"/data/data/com.termux/files/usr/lib/*.so* "$STAGE/" 2>/dev/null || true
+          }
+          for P in libopenssl zlib c-ares libicu libnghttp2; do fetch_deb "$P"; done
+          rm -f "$STAGE"/libc.so* "$STAGE"/libdl.so* "$STAGE"/libm.so*
+          ls -lh "$STAGE" && file "$STAGE/libnode.so"
 
       - name: Verify node binary is bionic-linked arm64
+
         run: |
           set -euo pipefail
           BIN="$RUNNER_TEMP/payload/lib/arm64-v8a/libnode.so"
@@ -543,9 +464,7 @@ jobs:
           set -euo pipefail
           P="$RUNNER_TEMP/payload"
           VERSION=$(node -p "require('./cli/package.json').version")
-          # compiled server bundle
           cp -r cli/app "$P/app"
-          # reference launcher — works as-is under Termux; same recipe inside an APK
           cat > "$P/start.sh" <<'START_EOF'
           #!/system/bin/sh
           # Reference launcher. In Termux run directly; inside your APK exec this
@@ -563,7 +482,6 @@ jobs:
           exec "$DIR/lib/arm64-v8a/libnode.so" "$DIR/app/server.js"
           START_EOF
           chmod +x "$P/start.sh"
-          # -C so the archive root is payload/ ; write straight to the final path
           tar -czf "$RUNNER_TEMP/artifact.tar.gz" -C "$RUNNER_TEMP" payload
           ls -lh "$RUNNER_TEMP/artifact.tar.gz"
           du -sh "$P/app" "$P/lib"
@@ -579,7 +497,7 @@ jobs:
           gh release view $TAG --repo $REPO || \
             gh release create $TAG --repo $REPO \
               --title "9Router Bionic-Native (Android arm64)" \
-              --notes "Compiled pieces only (no APK): bionic-linked node (NDK cross-compiled from ${{ inputs.node_version }}) + pruned server bundle + reference start.sh. Package your own APK — keep the binary named lib*.so under jniLibs/arm64-v8a with android:extractNativeLibs=\"true\" so W^X keeps it executable. glibc-only natives stripped (WASM fallback covers them)."
+              --notes "Compiled pieces only (no APK): bionic-linked node (Termux prebuilt) + pruned server bundle + reference start.sh. Package your own APK — keep the binary named lib*.so under jniLibs/arm64-v8a with android:extractNativeLibs=\"true\" so W^X keeps it executable. glibc-only natives stripped (WASM fallback covers them)."
 
           gh release upload $TAG "$PAYLOAD_TAR" --repo $REPO --clobber
           echo "✓ Android-native release updated at https://github.com/$REPO/releases/tag/$TAG"
