@@ -1,0 +1,533 @@
+# publish-9route-3 — EXPERIMENTAL: compile 9Router for Bionic-Native Android
+# (arm64-v8a). NO APK ASSEMBLY — this workflow only produces the compiled
+# pieces; you package the APK yourself:
+#
+#   Release artifact
+#     - 9router-<ver>-android-native-arm64.tar.gz
+#         payload/
+#         ├── lib/arm64-v8a/libnode.so    bionic-linked node ELF (rename freely,
+#         │                               e.g. drop into jniLibs/arm64-v8a/ — the
+#         │                               lib*.so name is what keeps it executable
+#         │                               under Android 10+ W^X via nativeLibraryDir)
+#         ├── lib/arm64-v8a/*.so          (Termux-fallback mode only) shared deps
+#         ├── app/                        compiled+pruned server bundle (server.js,
+#         │                               custom-server.js, .next-cli-build/,
+#         │                               node_modules/, public/, src/)
+#         └── start.sh                    reference launcher (works in Termux as-is;
+#                                         same exec recipe inside your APK)
+#
+# How the bionic node binary is obtained ("attempt" semantics):
+#   Path A (preferred): cross-compile Node.js from source with the runner's
+#     preinstalled Android NDK (--dest-os=android --dest-cpu=arm64).
+#   Path B (fallback): extract the Termux `nodejs` .deb (bionic-linked) plus its
+#     shared-library deps (openssl/zlib/c-ares/icu/nghttp2).
+#   Verified either way: ELF AArch64 + NO glibc markers (libc.so.6/GLIBC_*).
+#
+# App bundle policy (same optimizer as v2, plus android stripping):
+#   - dev-junk/source-maps pruned from node_modules ONLY; engine dependency
+#     closure (--strict) intact; engine-models/** untouched when baked.
+#   - glibc-only natives (onnxruntime-node/sharp/@img) stripped — transformers
+#     falls back to onnxruntime-web/WASM at runtime; engines stay fail-open.
+#   - 8-spec import smoke test gates the build (baseline before, recheck after).
+#   - Models NOT baked by default (+130MB); llmlingua fetches on demand.
+#
+# NOTE: QuickJS evaluated and rejected — Next.js/undici code needs a real V8.
+
+name: Build 9Router Bionic-Native Android binaries (no APK packaging)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch to build from 9router-private
+        required: true
+        default: master
+      release_tag:
+        description: Release tag to upload to
+        required: true
+        default: android-native-opt
+      node_version:
+        description: Node.js source tag for the NDK build attempt
+        required: true
+        default: v22.14.0
+      bake_models:
+        description: Bake llmlingua model weights into the bundle (+130MB)
+        required: false
+        default: "false"
+      skip_source_build:
+        description: Skip NDK source build, go straight to Termux extraction
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-9route-3-${{ inputs.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-bionic-native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      NODE_OPTIONS: --max-old-space-size=12288
+      NEXT_TELEMETRY_DISABLED: "1"
+      NPM_CONFIG_AUDIT: "false"
+      NPM_CONFIG_FUND: "false"
+      NPM_CONFIG_LOGLEVEL: error
+      NPM_CONFIG_PREFER_OFFLINE: "true"
+    steps:
+      - name: Checkout 9router from private repository
+        uses: actions/checkout@v4
+        with:
+          repository: jjjjjllll111/9router-private
+          ref: ${{ inputs.ref || 'master' }}
+          token: ${{ secrets.GH_PAT }}
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+          (cd cli && npm install --no-audit --no-fund)
+
+      - name: Build CLI
+        run: |
+          cd cli
+          npm run build
+          echo "✓ CLI build completed"
+
+      - name: Bundle engine deps (and optionally models) into cli/app
+        run: |
+          set -euo pipefail
+          node scripts/bundle-engine-deps.mjs cli/app-engine-deps --strict
+          if [ "${{ inputs.bake_models }}" = "true" ]; then
+            node scripts/preload-engine-models.mjs cli/app-engine-models
+            mkdir -p cli/app/engine-models
+            cp -r cli/app-engine-models/. cli/app/engine-models/
+          else
+            echo "::notice::bake_models=false — skipping model bake (runtime fail-open fetch)"
+          fi
+          if [ -d "cli/app-engine-deps/node_modules" ]; then
+            mkdir -p cli/app/node_modules
+            cp -r cli/app-engine-deps/node_modules/. cli/app/node_modules/
+          fi
+          du -sh cli/app 2>/dev/null || true
+
+      # ---- prune + integrity check (v2 policy + android glibc-native strip) ----
+      - name: Optimize artifact (prune dev-junk, strip maps, drop glibc natives)
+        run: |
+          cat > "$RUNNER_TEMP/optimize-bundle.mjs" <<'OPT_EOF'
+          #!/usr/bin/env node
+          /**
+           * v3 artifact optimizer = v2 policy + android strip list.
+           * Guardrails unchanged: never touches engine-models/**, never deletes
+           * whole dependency packages except the explicit glibc-native list
+           * (onnxruntime-node / sharp / @img) whose functionality is preserved
+           * via transformers' WASM fallback. 8-spec smoke test gates the build.
+           */
+          import fs from "node:fs";
+          import path from "node:path";
+          import { execFileSync } from "node:child_process";
+          import { createRequire } from "node:module";
+
+          const APP = path.resolve(process.argv[2] || "cli/app");
+          const NM = path.join(APP, "node_modules");
+          const MODELS = path.join(APP, "engine-models");
+          const MINIFY_BOOTSTRAP = process.env.OPT_MINIFY_BOOTSTRAP !== "0";
+          const STRIP_GLIBC = process.env.OPT_STRIP_GLIBC_NATIVE === "1";
+
+          const ENGINE_SPECS = [
+            "omniglyph",
+            "omniglyph/applicability",
+            "@huggingface/transformers",
+            "@atjsh/llmlingua-2",
+            "js-tiktoken/lite",
+            "js-tiktoken/ranks/o200k_base",
+            "smol-toml",
+            "safe-regex",
+          ];
+
+          /** glibc-linked native packages useless on bionic; WASM covers them. */
+          const GLIBC_ONLY_PKGS = ["onnxruntime-node", "sharp", "@img"];
+
+          const JUNK_DIRS = new Set([
+            "test", "tests", "__tests__", "__mocks__", "__fixtures__",
+            "coverage", ".nyc_output", ".github", ".circleci", ".git",
+            ".husky", ".vscode", ".idea", ".cache",
+            "docs", "doc", "example", "examples", "samples",
+            "benchmark", "benchmarks",
+          ]);
+
+          function fmtMiB(n) { return (n / 1024 / 1024).toFixed(1) + " MiB"; }
+
+          function walkStats(root) {
+            let files = 0, bytes = 0;
+            const stack = [root];
+            while (stack.length) {
+              const dir = stack.pop();
+              let entries;
+              try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+              for (const entry of entries) {
+                const p = path.join(dir, entry.name);
+                if (entry.isDirectory()) stack.push(p);
+                else { files++; try { bytes += fs.statSync(p).size; } catch { /* unreadable */ } }
+              }
+            }
+            return { files, bytes };
+          }
+
+          function smokeSpec(spec) {
+            try {
+              execFileSync(
+                process.execPath,
+                ["--no-warnings", "-e",
+                 "Promise.resolve().then(function(){return import(process.argv[1])})" +
+                 ".then(function(){process.exit(0)}," +
+                 "function(e){console.error(String((e&&e.message)||e));process.exit(1)})",
+                 spec],
+                { cwd: APP, stdio: ["ignore", "pipe", "pipe"], timeout: 90000 },
+              );
+              return true;
+            } catch { return false; }
+          }
+
+          function smokeAll() {
+            const out = {};
+            for (const spec of ENGINE_SPECS) out[spec] = smokeSpec(spec);
+            return out;
+          }
+
+          function junkFileKind(name) {
+            const lower = name.toLowerCase();
+            if (lower.endsWith(".map")) return "sourcemap";
+            if (lower.endsWith(".d.ts") || lower.endsWith(".d.mts") || lower.endsWith(".d.cts")) return "typedef";
+            if (lower.endsWith(".md") || lower.endsWith(".markdown")) return "docs";
+            if (
+              lower.endsWith(".tsbuildinfo") || lower.endsWith(".log") ||
+              lower.endsWith(".tgz") || lower.endsWith(".orig") || lower.endsWith(".rej")
+            ) return "misc";
+            if (
+              name === ".DS_Store" || name === "Thumbs.db" || name === ".npmignore" ||
+              name === ".eslintignore" || name === ".babelrc" || name === ".babelrc.js" ||
+              name === ".babelrc.cjs" || lower.startsWith(".eslintrc") ||
+              lower.startsWith(".prettierrc") || lower.startsWith(".mocharc") ||
+              lower.startsWith(".travis") || lower.startsWith(".appveyor") ||
+              lower.startsWith(".coveralls")
+            ) return "config";
+            return null;
+          }
+
+          const deleted = {};
+          function count(kind) {
+            if (!deleted[kind]) deleted[kind] = { count: 0, bytes: 0 };
+            return deleted[kind];
+          }
+          function rmPath(kind, p) {
+            let bytes = 0;
+            try { bytes = fs.statSync(p).size ?? 0; } catch { /* gone already */ }
+            fs.rmSync(p, { recursive: true, force: true });
+            const bucket = count(kind);
+            bucket.count += 1;
+            bucket.bytes += bytes;
+          }
+
+          function isDataMap(dir, name) {
+            const base = name.slice(0, -4);
+            let siblings;
+            try { siblings = fs.readdirSync(dir); } catch { return false; }
+            return !(
+              siblings.includes(base + ".js") ||
+              siblings.includes(base + ".mjs") ||
+              siblings.includes(base + ".cjs")
+            );
+          }
+
+          function pruneNodeModules() {
+            const stack = [NM];
+            while (stack.length) {
+              const dir = stack.pop();
+              let entries;
+              try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+              for (const entry of entries) {
+                const p = path.join(dir, entry.name);
+                if (entry.isDirectory()) {
+                  if (JUNK_DIRS.has(entry.name)) { rmPath("junkdir", p); continue; }
+                  stack.push(p);
+                  continue;
+                }
+                const kind = junkFileKind(entry.name);
+                if (kind) rmPath(kind, p);
+              }
+            }
+          }
+
+          function sweepAppMaps() {
+            const stack = [APP];
+            while (stack.length) {
+              const dir = stack.pop();
+              if (dir === NM) continue;
+              if (dir === MODELS || dir.startsWith(MODELS + path.sep)) continue;
+              let entries;
+              try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+              for (const entry of entries) {
+                const p = path.join(dir, entry.name);
+                if (entry.isDirectory()) { stack.push(p); continue; }
+                const lower = entry.name.toLowerCase();
+                if (lower.endsWith(".map")) {
+                  if (!isDataMap(dir, entry.name)) rmPath("sourcemap", p);
+                } else if (entry.name === ".DS_Store" || entry.name === "Thumbs.db") {
+                  rmPath("misc", p);
+                }
+              }
+            }
+          }
+
+          function stripGlibcNatives() {
+            if (!STRIP_GLIBC) return;
+            for (const name of GLIBC_ONLY_PKGS) {
+              const p = path.join(NM, name);
+              if (fs.existsSync(p)) {
+                console.log("strip(glibc): removing " + name + " (WASM fallback covers it)");
+                rmPath("glibc-native", p);
+              }
+            }
+          }
+
+          function sweepEmptyDirs(root) {
+            const order = [];
+            const stack = [root];
+            while (stack.length) {
+              const dir = stack.pop();
+              order.push(dir);
+              let entries;
+              try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+              for (const entry of entries) {
+                if (entry.isDirectory()) stack.push(path.join(dir, entry.name));
+              }
+            }
+            let removed = 0;
+            for (const dir of order.reverse()) {
+              try {
+                if (fs.readdirSync(dir).length === 0) { fs.rmdirSync(dir); removed++; }
+              } catch { /* raced or non-empty */ }
+            }
+            return removed;
+          }
+
+          function minifyBootstraps() {
+            if (!MINIFY_BOOTSTRAP) return { files: 0, saved: 0 };
+            const requireFromCli = createRequire(path.resolve("cli/package.json"));
+            const esbuild = requireFromCli("esbuild");
+            let files = 0, saved = 0;
+            for (const name of ["custom-server.js", "server.js"]) {
+              const p = path.join(APP, name);
+              if (!fs.existsSync(p)) continue;
+              const src = fs.readFileSync(p, "utf8");
+              const out = esbuild.transformSync(src, { minify: true, platform: "node", target: "node18" });
+              if (out.code.length < src.length) {
+                fs.writeFileSync(p, out.code);
+                files++;
+                saved += Buffer.byteLength(src) - Buffer.byteLength(out.code);
+              }
+            }
+            return { files, saved };
+          }
+
+          if (!fs.existsSync(NM)) { console.error("optimize-bundle: missing " + NM); process.exit(2); }
+
+          const statsBefore = walkStats(APP);
+          const beforeSmoke = smokeAll();
+
+          pruneNodeModules();
+          sweepAppMaps();
+          stripGlibcNatives();
+          const emptyDirsRemoved = sweepEmptyDirs(NM);
+          const minified = minifyBootstraps();
+
+          const statsAfter = walkStats(APP);
+          const afterSmoke = smokeAll();
+
+          const regressions = ENGINE_SPECS.filter((s) => beforeSmoke[s] && !afterSmoke[s]);
+          const report = [
+            "",
+            "== optimize-bundle report (v3/android) ==",
+            "files : " + statsBefore.files + " -> " + statsAfter.files +
+              " (-" + (statsBefore.files - statsAfter.files) + ")",
+            "bytes : " + fmtMiB(statsBefore.bytes) + " -> " + fmtMiB(statsAfter.bytes) +
+              " (-" + fmtMiB(Math.max(0, statsBefore.bytes - statsAfter.bytes)) + ")",
+            ...Object.entries(deleted).map(
+              ([kind, v]) => "  " + kind.padEnd(12) + ": " + v.count + " removed (" + fmtMiB(v.bytes) + ")",
+            ),
+            "empty dirs removed: " + emptyDirsRemoved,
+            "bootstrap minified: " + minified.files + " files, " + fmtMiB(minified.saved) + " saved",
+            "",
+            "| spec | before | after |",
+            "| --- | --- | --- |",
+            ...ENGINE_SPECS.map((spec) =>
+              "| `" + spec + "` | " + (beforeSmoke[spec] ? "✅" : "❌") +
+              " | " + (afterSmoke[spec] ? "✅" : "❌") + " |"),
+          ].join("\n");
+          console.log(report);
+
+          if (process.env.GITHUB_STEP_SUMMARY) {
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, report + "\n");
+          }
+          if (regressions.length > 0) {
+            console.error("optimize-bundle: engine imports BROKEN by pruning: " + regressions.join(", "));
+            process.exit(3);
+          }
+          OPT_EOF
+          OPT_STRIP_GLIBC_NATIVE=1 node "$RUNNER_TEMP/optimize-bundle.mjs" cli/app
+
+      # ---- PATH A: cross-compile node from source against bionic (attempt) ----
+      - name: Attempt NDK source build of Node.js
+        id: nodesrc
+        if: ${{ inputs.skip_source_build != 'true' }}
+        continue-on-error: true
+        timeout-minutes: 75
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          NDK=$(ls -d "$SDK"/ndk/* 2>/dev/null | sort -V | tail -1 || true)
+          if [ -z "$NDK" ]; then echo "No NDK on runner"; exit 1; fi
+          echo "Using NDK: $NDK"
+          git clone --depth 1 --branch "${{ inputs.node_version }}" \
+            https://github.com/nodejs/node.git "$RUNNER_TEMP/node-src"
+          TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC="$TC/aarch64-linux-android24-clang"
+          export CXX="$TC/aarch64-linux-android24-clang++"
+          export AR="$TC/llvm-ar"
+          export RANLIB="$TC/llvm-ranlib"
+          export STRIP="$TC/llvm-strip"
+          cd "$RUNNER_TEMP/node-src"
+          ./configure \
+            --dest-cpu=arm64 \
+            --dest-os=android \
+            --cross-compiling \
+            --with-intl=small-icu \
+            --without-corepack \
+            --without-npm
+          make -j"$(nproc)" node
+          BIN="$PWD/out/Release/node"
+          file "$BIN"
+          mkdir -p "$RUNNER_TEMP/payload/lib/arm64-v8a"
+          cp "$BIN" "$RUNNER_TEMP/payload/lib/arm64-v8a/libnode.so"
+          chmod +x "$RUNNER_TEMP/payload/lib/arm64-v8a/libnode.so"
+          "$TC/llvm-strip" "$RUNNER_TEMP/payload/lib/arm64-v8a/libnode.so" || true
+          echo "mode=source" >> "$GITHUB_OUTPUT"
+
+      # ---- PATH B: Termux bionic node extraction (fallback) ----
+      - name: Fallback — extract bionic node from Termux packages
+        if: ${{ steps.nodesrc.outcome == 'skipped' || steps.nodesrc.outcome == 'failure' }}
+        id: nodetermux
+        run: |
+          set -euo pipefail
+          STAGE="$RUNNER_TEMP/payload/lib/arm64-v8a"
+          mkdir -p "$STAGE"
+          IDX=$(curl -fsSL https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages)
+          NF=$(printf '%s\n' "$IDX" | awk -v RS= -v FS='\n' \
+            '$1 ~ /^Package: nodejs$/ { for (i=1;i<=NF;i++) if ($i ~ /^Filename:/) { sub(/^Filename: /,"",$i); print $i; exit } }')
+          [ -z "$NF" ] && { echo "FATAL: termux nodejs package not found"; exit 1; }
+          curl -fsSL "https://packages.termux.dev/apt/termux-main/$NF" -o "$RUNNER_TEMP/node.deb"
+          mkdir -p "$RUNNER_TEMP/nex"
+          ( cd "$RUNNER_TEMP/nex" && ar x "$RUNNER_TEMP/node.deb" && tar -xf data.tar.* )
+          cp "$RUNNER_TEMP/nex"/data/data/com.termux/files/usr/bin/node "$STAGE/libnode.so"
+          chmod +x "$STAGE/libnode.so"
+          fetch_deb () { # $1=pkg-name
+            local F
+            F=$(printf '%s\n' "$IDX" | awk -v RS= -v FS='\n' -v pat="^Package: $1\$" \
+              '$1 ~ pat { for (i=1;i<=NF;i++) if ($i ~ /^Filename:/) { sub(/^Filename: /,"",$i); print $i; exit } }')
+            [ -z "$F" ] && { echo "  (package $1 not found in repo index)"; return 0; }
+            echo "  fetching $1 ..."
+            curl -fsSL "https://packages.termux.dev/apt/termux-main/$F" -o "$RUNNER_TEMP/p.deb"
+            mkdir -p "$RUNNER_TEMP/pex"
+            ( cd "$RUNNER_TEMP/pex" && rm -rf data.tar.* debian-binary control.tar.* && \
+              ar x "$RUNNER_TEMP/p.deb" && tar -xf data.tar.* )
+            cp "$RUNNER_TEMP/pex"/data/data/com.termux/files/usr/lib/*.so* "$STAGE/" 2>/dev/null || true
+          }
+          # dependency libs (extra unused ones are harmless)
+          for P in libopenssl zlib c-ares libicu libnghttp2; do
+            fetch_deb "$P"
+          done
+          # never ship bionic's own runtime libs
+          rm -f "$STAGE"/libc.so* "$STAGE"/libdl.so* "$STAGE"/libm.so*
+          echo "mode=termux" >> "$GITHUB_OUTPUT"
+
+      - name: Verify node binary is bionic-linked arm64
+        run: |
+          set -euo pipefail
+          BIN="$RUNNER_TEMP/payload/lib/arm64-v8a/libnode.so"
+          file "$BIN"
+          readelf -h "$BIN" | grep -q "Machine:.*AArch64" || { echo "FATAL: not AArch64"; exit 1; }
+          if readelf -d "$BIN" | grep -Eq "libc\.so\.6|libpthread\.so\.0|GLIBC_"; then
+            echo "FATAL: binary links glibc — not bionic"; exit 1
+          fi
+          echo "NEEDED libraries:"
+          readelf -d "$BIN" | grep NEEDED || true
+          LIBS=$(ls "$RUNNER_TEMP/payload/lib/arm64-v8a")
+          for SO in $(readelf -d "$BIN" | grep -oP '(?<=Shared library: \[)[^\]]+' ); do
+            case "$SO" in
+              libc.so|libdl.so|libm.so) ;; # bionic system libs — fine
+              *)
+                echo "$LIBS" | grep -qx "$SO" || \
+                  echo "::warning::soname $SO not staged (runtime LD_LIBRARY_PATH miss possible)"
+                ;;
+            esac
+          done
+          echo "✓ bionic verification passed"
+
+      # ---- assemble the deliverable: bionic node + compiled app + launcher ----
+      - name: Stage payload (node binary + app bundle + start.sh)
+        run: |
+          set -euo pipefail
+          P="$RUNNER_TEMP/payload"
+          VERSION=$(node -p "require('./cli/package.json').version")
+          # compiled server bundle
+          cp -r cli/app "$P/app"
+          # reference launcher — works as-is under Termux; same recipe inside an APK
+          cat > "$P/start.sh" <<'START_EOF'
+          #!/system/bin/sh
+          # Reference launcher. In Termux run directly; inside your APK exec this
+          # same sequence from nativeLibraryDir/filesDir equivalents.
+          set -eu
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+          export PORT="${PORT:-20128}"
+          export HOSTNAME="${HOSTNAME:-127.0.0.1}"
+          export HOME="$DIR"
+          export TMPDIR="$DIR/tmp"
+          export NODE_PATH="$DIR/app/node_modules"
+          export LD_LIBRARY_PATH="$DIR/lib/arm64-v8a${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export NEXT_TELEMETRY_DISABLED=1
+          mkdir -p "$TMPDIR"
+          exec "$DIR/lib/arm64-v8a/libnode.so" "$DIR/app/server.js"
+          START_EOF
+          chmod +x "$P/start.sh"
+          (cd "$RUNNER_TEMP" && tar -czf "9router-$VERSION-android-native-arm64.tar.gz" payload)
+          mv "9router-$VERSION-android-native-arm64.tar.gz" "$RUNNER_TEMP/artifact.tar.gz"
+          ls -lh "$RUNNER_TEMP/artifact.tar.gz"
+          du -sh "$P/app" "$P/lib"
+          echo "PAYLOAD_TAR=$RUNNER_TEMP/artifact.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          TAG=${{ inputs.release_tag || 'android-native-opt' }}
+          REPO=jjjjjllll111/9router-private
+
+          gh release view $TAG --repo $REPO || \
+            gh release create $TAG --repo $REPO \
+              --title "9Router Bionic-Native (Android arm64)" \
+              --notes "Compiled pieces only (no APK): bionic-linked node ($( [ -n "${{ steps.nodesrc.outputs.mode }}" ] && echo "NDK source build" || echo "Termux extraction" )) + pruned server bundle + reference start.sh. Package your own APK — keep the binary named lib*.so under jniLibs/arm64-v8a with android:extractNativeLibs=\"true\" so W^X keeps it executable. glibc-only natives stripped (WASM fallback covers them)."
+
+          gh release upload $TAG "$PAYLOAD_TAR" --repo $REPO --clobber
+          echo "✓ Android-native release updated at https://github.com/$REPO/releases/tag/$TAG"
