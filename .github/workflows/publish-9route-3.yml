@@ -344,6 +344,43 @@ jobs:
             console.log("stub: onnxruntime-node -> onnxruntime-web; sharp -> fail-open");
           }
 
+          /**
+           * Pre-seed transformers.js FileCache with the ORT wasm/mjs binaries at
+           * the EXACT cache paths its version-pinned jsDelivr loader expects:
+           *   <cacheDir>/https:/cdn.jsdelivr.net/npm/onnxruntime-web@<ver>/dist/<file>
+           * Result: first llmlingua inference on an offline device hits the
+           * cache instead of the network (blob:-import then proceeds locally).
+           */
+          function seedOrtWasmCache() {
+            try {
+              const ortPkg = JSON.parse(
+                fs.readFileSync(path.join(NM, "onnxruntime-web", "package.json"), "utf8"),
+              );
+              const distDir = path.join(NM, "onnxruntime-web", "dist");
+              const cacheRoot = path.join(APP, "engine-models");
+              if (!fs.existsSync(cacheRoot)) {
+                console.log("seed-ort-wasm: no engine-models dir (models not baked) — skipped");
+                return;
+              }
+              const rel = ("https://cdn.jsdelivr.net/npm/onnxruntime-web@" + ortPkg.version + "/dist/").replace(
+                "https://",
+                "https:/",
+              ); // path.join collapses '//' on posix — matches FileCache layout
+              const destDir = path.join(cacheRoot, rel);
+              fs.mkdirSync(destDir, { recursive: true });
+              let n = 0;
+              for (const f of fs.readdirSync(distDir)) {
+                if (!/\.(wasm|mjs)$/.test(f)) continue;
+                fs.copyFileSync(path.join(distDir, f), path.join(destDir, f));
+                n++;
+              }
+              count("ort-wasm-seed").count = n;
+              console.log("seed-ort-wasm: cached " + n + " files for onnxruntime-web@" + ortPkg.version);
+            } catch (e) {
+              console.warn("seed-ort-wasm: non-fatal failure — " + String((e && e.message) || e));
+            }
+          }
+
           function sweepEmptyDirs(root) {
             const order = [];
             const stack = [root];
@@ -393,6 +430,7 @@ jobs:
           sweepAppMaps();
           stripGlibcNatives();
           writeStubs();
+          seedOrtWasmCache();
           const emptyDirsRemoved = sweepEmptyDirs(NM);
           const minified = minifyBootstraps();
 
@@ -516,6 +554,9 @@ jobs:
           export TMPDIR="$DIR/tmp"
           export NODE_PATH="$DIR/app/node_modules"
           export LD_LIBRARY_PATH="$DIR/lib/arm64-v8a${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          # Baked llmlingua models + pre-seeded ORT wasm cache live here;
+          # engine resolves them via LLMLINGUA_CACHE_DIR (offline-first).
+          export LLMLINGUA_CACHE_DIR="$DIR/app/engine-models"
           export NEXT_TELEMETRY_DISABLED=1
           mkdir -p "$TMPDIR"
           exec "$DIR/lib/arm64-v8a/libnode.so" "$DIR/app/server.js"
