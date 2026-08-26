@@ -552,24 +552,38 @@ jobs:
           set -euo pipefail
           OUT="$RUNNER_TEMP/hroom"
           mkdir -p "$OUT/wheels"
+          # termux 的 pkg 拒绝以 root 运行（容器默认就是 root）→
+          # 先建非 root 用户 builder，把 termux 前缀与挂载目录 chown 给它，
+          # 再降权执行真正的构建脚本 inner.sh。
+          cat > "$OUT/inner.sh" <<'INNER_EOF'
+          set -euo pipefail
+          pkg update -y || true
+          yes | pkg install -y python clang binutils pkg-config || true
+          python -m pip install -U pip wheel setuptools
+          pip wheel --no-deps -w /work/wheels "headroom-ai[proxy,code]" \
+            || { echo "[retry] [proxy,code] failed — falling back to [proxy] only"; \
+                 pip wheel --no-deps -w /work/wheels "headroom-ai[proxy]"; }
+          pip wheel -w /work/wheels fastapi uvicorn starlette anyio click h11 httpx \
+            tree-sitter tree-sitter-language-pack || true
+          ls -lh /work/wheels | tail -30
+          INNER_EOF
+          cat > "$OUT/wrap.sh" <<'WRAP_EOF'
+          #!/data/data/com.termux/files/usr/bin/bash
+          set -euo pipefail
+          if ! id -u builder >/dev/null 2>&1; then
+            useradd -m -s /bin/bash builder
+          fi
+          chown -R builder:builder /data/data/com.termux /work /home/builder
+          chmod +x /work/inner.sh
+          su builder -c "bash /work/inner.sh" || \
+            runuser -u builder -- bash /work/inner.sh
+          WRAP_EOF
+          chmod +x "$OUT/wrap.sh"
           docker run --rm --platform linux/arm64 \
             --entrypoint /data/data/com.termux/files/usr/bin/bash \
             -v "$OUT:/work" \
             termux/termux-docker:latest \
-            -lc '
-              set -euo pipefail
-              apt update -y || true
-              yes | pkg install -y python clang binutils pkg-config || true
-              python -m pip install -U pip wheel setuptools
-              # primary: full lib with code AST extra
-              pip wheel --no-deps -w /work/wheels "headroom-ai[proxy,code]" \
-                || echo "::warning::[proxy,code] failed — retrying [proxy] only"
-              pip wheel --no-deps -w /work/wheels "headroom-ai[proxy]"
-              # runtime deps commonly lacking termux prebuilts
-              pip wheel -w /work/wheels fastapi uvicorn starlette anyio click h11 httpx \
-                tree-sitter tree-sitter-language-pack || true
-              ls -lh /work/wheels | tail -30
-            '
+            /work/wrap.sh
           cat > "$OUT/bootstrap-headroom.sh" <<'BOOT_EOF'
           #!/data/data/com.termux/files/usr/bin/sh
           # Offline installer: run inside Termux next to the wheels/ directory.
