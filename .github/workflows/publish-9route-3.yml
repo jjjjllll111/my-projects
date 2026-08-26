@@ -560,9 +560,12 @@ jobs:
           pkg update -y || true
           yes | pkg install -y python clang binutils pkg-config || true
           python -m pip install -U pip wheel setuptools
-          pip wheel --no-deps -w /work/wheels "headroom-ai[proxy,code]" \
-            || { echo "[retry] [proxy,code] failed — falling back to [proxy] only"; \
+          pip wheel --no-deps -w /work/wheels "headroom-ai[proxy,code,llmlingua]" \
+            || { echo "[retry] full extras failed — falling back to [proxy,code]"; \
+                 pip wheel --no-deps -w /work/wheels "headroom-ai[proxy,code]" || \
                  pip wheel --no-deps -w /work/wheels "headroom-ai[proxy]"; }
+          # llmlingua runtime deps not covered by --no-deps pass above
+          pip wheel -w /work/wheels llmlingua transformers accelerate || true
           pip wheel -w /work/wheels fastapi uvicorn starlette anyio click h11 httpx \
             tree-sitter tree-sitter-language-pack || true
           ls -lh /work/wheels | tail -30
@@ -594,6 +597,8 @@ jobs:
           echo "[2/3] installing bundled wheels..."
           pip install --no-index --find-links "$HERE/wheels" headroom-ai || \
             pip install --find-links "$HERE/wheels" headroom-ai
+          echo "    ContentRouter text branch = LLMLingua-2 XLM-R large"
+          echo "    (first run downloads fp32 weights ~2GB from HF; cached afterwards)"
           echo "[3/3] optional ML backend:"
           echo "  pkg install python-torch        # satisfies the [ml] torch import"
           echo "  headroom proxy --port 8787      # then point 9Router at http://127.0.0.1:8787/v1/compress"
