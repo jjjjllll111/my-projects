@@ -553,12 +553,10 @@ jobs:
           OUT="$RUNNER_TEMP/hroom"
           mkdir -p "$OUT/wheels"
           # termux 的 pkg 拒绝以 root 运行（容器默认就是 root）→
-          # 先建非 root 用户 builder，把 termux 前缀与挂载目录 chown 给它，
-          # 再降权执行真正的构建脚本 inner.sh。
           cat > "$OUT/inner.sh" <<'INNER_EOF'
           set -euo pipefail
-          pkg update -y || true
-          yes | pkg install -y python clang binutils pkg-config || true
+          apt update -y
+          DEBIAN_FRONTEND=noninteractive apt install -y python clang binutils pkg-config
           python -m pip install -U pip wheel setuptools
           pip wheel --no-deps -w /work/wheels "headroom-ai[proxy,code,llmlingua]" \
             || { echo "[retry] full extras failed — falling back to [proxy,code]"; \
@@ -573,13 +571,8 @@ jobs:
           cat > "$OUT/wrap.sh" <<'WRAP_EOF'
           #!/data/data/com.termux/files/usr/bin/bash
           set -euo pipefail
-          if ! id -u builder >/dev/null 2>&1; then
-            useradd -m -s /bin/bash builder
-          fi
-          chown -R builder:builder /data/data/com.termux /work /home/builder
-          chmod +x /work/inner.sh
-          su builder -c "bash /work/inner.sh" || \
-            runuser -u builder -- bash /work/inner.sh
+          # termux 镜像无 useradd；底层 apt 以 root 运行正常（拒绝 root 的只是 pkg 包装脚本）
+          bash /work/inner.sh
           WRAP_EOF
           chmod +x "$OUT/wrap.sh"
           docker run --rm --platform linux/arm64 \
@@ -593,7 +586,7 @@ jobs:
           set -eu
           HERE="$(cd "$(dirname "$0")" && pwd)"
           echo "[1/3] installing base packages..."
-          yes | pkg install -y python clang binutils pkg-config
+          DEBIAN_FRONTEND=noninteractive apt install -y python clang binutils pkg-config
           echo "[2/3] installing bundled wheels..."
           pip install --no-index --find-links "$HERE/wheels" headroom-ai || \
             pip install --find-links "$HERE/wheels" headroom-ai
