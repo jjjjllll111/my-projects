@@ -538,6 +538,68 @@ jobs:
           rm -f "$STAGE"/libc.so* "$STAGE"/libdl.so* "$STAGE"/libm.so*
           ls -lh "$STAGE" && file "$STAGE/libnode.so"
 
+      # ---- Termux-format headroom bundle: built inside the official termux
+      # ---- aarch64 rootfs (via qemu), shipped as offline wheels + bootstrap.
+      # NOTE: [ml]/torch is intentionally NOT wheeled — devices install
+      # `pkg install python-torch` themselves; Kompress-v2 weights download at
+      # bootstrap time.
+      - name: Set up QEMU (arm64 emulation for termux rootfs)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Build headroom Termux wheel bundle
+        timeout-minutes: 80
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/hroom"
+          mkdir -p "$OUT/wheels"
+          docker run --rm --platform linux/arm64 \
+            --entrypoint /data/data/com.termux/files/usr/bin/bash \
+            -v "$OUT:/work" \
+            termux/termux-docker:latest \
+            -lc '
+              set -euo pipefail
+              apt update -y || true
+              yes | pkg install -y python clang binutils pkg-config || true
+              python -m pip install -U pip wheel setuptools
+              # primary: full lib with code AST extra
+              pip wheel --no-deps -w /work/wheels "headroom-ai[proxy,code]" \
+                || echo "::warning::[proxy,code] failed — retrying [proxy] only"
+              pip wheel --no-deps -w /work/wheels "headroom-ai[proxy]"
+              # runtime deps commonly lacking termux prebuilts
+              pip wheel -w /work/wheels fastapi uvicorn starlette anyio click h11 httpx \
+                tree-sitter tree-sitter-language-pack || true
+              ls -lh /work/wheels | tail -30
+            '
+          cat > "$OUT/bootstrap-headroom.sh" <<'BOOT_EOF'
+          #!/data/data/com.termux/files/usr/bin/sh
+          # Offline installer: run inside Termux next to the wheels/ directory.
+          set -eu
+          HERE="$(cd "$(dirname "$0")" && pwd)"
+          echo "[1/3] installing base packages..."
+          yes | pkg install -y python clang binutils pkg-config
+          echo "[2/3] installing bundled wheels..."
+          pip install --no-index --find-links "$HERE/wheels" headroom-ai || \
+            pip install --find-links "$HERE/wheels" headroom-ai
+          echo "[3/3] optional ML backend:"
+          echo "  pkg install python-torch        # satisfies the [ml] torch import"
+          echo "  headroom proxy --port 8787      # then point 9Router at http://127.0.0.1:8787/v1/compress"
+          echo "done."
+          BOOT_EOF
+          chmod +x "$OUT/bootstrap-headroom.sh"
+          tar -czf "$RUNNER_TEMP/headroom-termux-aarch64.tar.gz" -C "$OUT" wheels bootstrap-headroom.sh
+          ls -lh "$RUNNER_TEMP/headroom-termux-aarch64.tar.gz"
+          echo "TERMUX_TAR=$RUNNER_TEMP/headroom-termux-aarch64.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Upload headroom Termux bundle to Release
+        if: ${{ env.TERMUX_TAR != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          TAG=${{ inputs.release_tag || 'android-native-opt' }}
+          REPO=jjjjllll111/9router-private
+          gh release upload $TAG "$TERMUX_TAR" --repo $REPO --clobber
+          echo "✓ headroom termux bundle uploaded"
+
       - name: Verify node binary is bionic-linked arm64
 
         run: |
