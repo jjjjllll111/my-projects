@@ -1,0 +1,189 @@
+# Build PocketDeploy APK (bionic-native) via my-projects runner
+# Runs on jjjjllll111 account (billing OK). Produces debug APK using:
+# - PocketDeploy repo (this project skeleton is in PocketDeploy, built here)
+# - 9router-private standalone (Next.js build) -> android/assets/9router
+# - bionic node (Termux aarch64) -> android/assets/node-bionic
+name: Build PocketDeploy APK (bionic-native)
+
+on:
+  workflow_dispatch:
+    inputs:
+      pocketdeploy_ref:
+        description: PocketDeploy branch/ref to build
+        required: false
+        default: main
+      nine_router_ref:
+        description: 9router-private branch/ref to build
+        required: false
+        default: master
+      build_type:
+        description: debug or release
+        required: false
+        default: debug
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pocketdeploy-apk-${{ inputs.pocketdeploy_ref || 'main' }}
+  cancel-in-progress: false
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      NODE_OPTIONS: --max-old-space-size=8192
+      NEXT_TELEMETRY_DISABLED: "1"
+      NPM_CONFIG_AUDIT: "false"
+      NPM_CONFIG_FUND: "false"
+      NPM_CONFIG_LOGLEVEL: error
+    steps:
+      - name: Checkout PocketDeploy
+        uses: actions/checkout@v4
+        with:
+          repository: jjjjllll111/PocketDeploy
+          ref: ${{ inputs.pocketdeploy_ref || 'main' }}
+          token: ${{ secrets.GH_PAT }}
+          fetch-depth: 1
+
+      - name: Checkout 9router-private
+        uses: actions/checkout@v4
+        with:
+          repository: jjjjllll111/9router-private
+          ref: ${{ inputs.nine_router_ref || 'master' }}
+          token: ${{ secrets.GH_PAT }}
+          path: _9router
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: _9router/package-lock.json
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK + platforms
+        run: |
+          set -euo pipefail
+          sdkmanager --install "ndk;27.2.12479018" "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+
+      - name: Install 9router deps
+        run: |
+          set -euo pipefail
+          cd _9router
+          npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+          (cd cli && npm install --no-audit --no-fund) || true
+
+      - name: Build 9router standalone
+        run: |
+          set -euo pipefail
+          cd _9router
+          npm run build
+          node scripts/copy-standalone-assets.mjs
+          ls -lh .next/standalone | head -20
+          test -f .next/standalone/server.js || test -f .next/standalone/custom-server.js || { echo "FATAL: standalone entry missing"; ls -R .next/standalone | head -40; exit 1; }
+
+      - name: Bundle engine deps (optional)
+        run: |
+          set -euo pipefail
+          cd _9router
+          if [ -f scripts/bundle-engine-deps.mjs ]; then
+            node scripts/bundle-engine-deps.mjs cli/app-engine-deps --strict || echo "::warning::bundle-engine-deps failed"
+            if [ -d cli/app-engine-deps/node_modules ]; then
+              mkdir -p cli/app/node_modules
+              cp -rn cli/app-engine-deps/node_modules/. cli/app/node_modules/ 2>/dev/null || cp -r cli/app-engine-deps/node_modules/. cli/app/node_modules/
+            fi
+          fi
+
+      - name: Sync 9router standalone -> android assets
+        run: |
+          set -euo pipefail
+          STANDALONE="_9router/.next/standalone"
+          ASSETS="android/app/src/main/assets/9router"
+          rm -rf "$ASSETS"
+          mkdir -p "$ASSETS"
+          cp -a "$STANDALONE"/. "$ASSETS"/
+          if [ ! -f "$ASSETS/custom-server.js" ] && [ -f "_9router/custom-server.js" ]; then cp "_9router/custom-server.js" "$ASSETS"/; fi
+          find "$ASSETS" -maxdepth 3 -type f | head -30
+          du -sh "$ASSETS"
+          test -f "$ASSETS/server.js" || test -f "$ASSETS/custom-server.js" || { echo "FATAL: no entry in assets/9router"; exit 1; }
+
+      - name: Extract bionic node -> assets/node-bionic
+        run: |
+          set -euo pipefail
+          TMP="$RUNNER_TEMP/termux-node"
+          mkdir -p "$TMP/nex"
+          PKGINDEX="$TMP/Packages"
+          curl -fsSL https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages -o "$PKGINDEX"
+          pkg_file() {
+            awk -v RS= -v FS='\n' -v pat="^Package: $1\$" '$1 ~ pat { for (i=1;i<=NF;i++) if ($i ~ /^Filename:/) { sub(/^Filename: /,"",$i); print $i; exit } }' "$PKGINDEX"
+          }
+          NF=$(pkg_file nodejs)
+          [ -z "$NF" ] && { echo "FATAL: termux nodejs not found"; exit 1; }
+          curl -fsSL "https://packages.termux.dev/apt/termux-main/$NF" -o "$TMP/node.deb"
+          ( cd "$TMP/nex" && ar x "$TMP/node.deb" && tar -xf data.tar.* )
+          NODE_BIN="$TMP/nex/data/data/com.termux/files/usr/bin/node"
+          test -x "$NODE_BIN" || { echo "FATAL: node missing"; ls -R "$TMP" | head -40; exit 1; }
+          DEST="android/app/src/main/assets/node-bionic"
+          mkdir -p "$(dirname "$DEST")"
+          cp "$NODE_BIN" "$DEST"
+          chmod +x "$DEST"
+          file "$DEST"
+          if readelf -d "$DEST" 2>/dev/null | grep -Eq "libc\.so\.6|GLIBC_"; then echo "FATAL: glibc-linked"; readelf -d "$DEST" | grep NEEDED; exit 1; fi
+          readelf -d "$DEST" 2>/dev/null | grep NEEDED || true
+          ls -lh "$DEST"
+
+      - name: Build APK
+        run: |
+          set -euo pipefail
+          cd android
+          chmod +x gradlew
+          if [ "${{ inputs.build_type }}" = "release" ]; then
+            ./gradlew :app:assembleRelease --stacktrace
+            APK="app/build/outputs/apk/release/app-release-unsigned.apk"
+          else
+            ./gradlew :app:assembleDebug --stacktrace
+            APK="app/build/outputs/apk/debug/app-debug.apk"
+          fi
+          echo "APK=$APK" >> "$GITHUB_ENV"
+          ls -lh "$APK"
+          du -sh "$APK"
+
+      - name: Verify APK
+        run: |
+          set -euo pipefail
+          APK="android/${{ env.APK }}"
+          unzip -l "$APK" | grep -E "assets/9router|assets/node-bionic|classes" | head -40
+          if ! unzip -l "$APK" | grep -q "assets/node-bionic"; then echo "::warning::assets/node-bionic missing"; fi
+          if ! unzip -l "$APK" | grep -q "assets/9router/server.js\|assets/9router/custom-server.js"; then echo "::error::assets/9router entry missing"; exit 1; fi
+          du -sh "$APK"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PocketDeploy-${{ inputs.build_type || 'debug' }}-apk
+          path: android/${{ env.APK }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Summary
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ### PocketDeploy APK
+          - **PocketDeploy:** \`${{ inputs.pocketdeploy_ref || 'main' }}\`
+          - **9router:** \`${{ inputs.nine_router_ref || 'master' }}\`
+          - **APK:** \`${{ env.APK }}\` — $(du -h "android/${{ env.APK }}" | cut -f1)
+          - **Run:** install, FGS keepalive, LAN \`http://<IP>:20127\`
+          EOF
