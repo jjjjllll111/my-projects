@@ -112,7 +112,6 @@ jobs:
           mkdir -p cli/app/engine-models
           cp -rn cli/app-engine-models/. cli/app/engine-models/ 2>/dev/null || true
           du -sh cli/app/engine-models || true
-          fi
 
       - name: Sync 9router standalone -> android assets
         run: |
