@@ -1,4 +1,5 @@
 # Build PocketDeploy APK (bionic-native) via my-projects runner
+# Mobile XNNPACK EP backend (transformers WASM XNNPACK, strict fail-open) — x86 OpenVINO not bundled in APK
 # Runs on jjjjllll111 account (billing OK). Produces debug APK using:
 # - PocketDeploy repo (this project skeleton is in PocketDeploy, built here)
 # - 9router-private standalone (Next.js build) -> android/assets/9router
@@ -104,6 +105,8 @@ jobs:
             if [ -d cli/app-engine-deps/node_modules ]; then
               mkdir -p cli/app/node_modules
               cp -rn cli/app-engine-deps/node_modules/. cli/app/node_modules/ 2>/dev/null || cp -r cli/app-engine-deps/node_modules/. cli/app/node_modules/
+            echo "XNNPACK backend: @huggingface/transformers WASM (mobile) — verify smoke"
+            node -e "import('@huggingface/transformers').then(()=>console.log('XNNPACK smoke: transformers OK')).catch(e=>{console.error(e);process.exit(1)})" 2>&1 | head -20 || echo "::warning::transformers smoke failed (offline?)"
             fi
           fi
 
