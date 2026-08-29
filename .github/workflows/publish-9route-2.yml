@@ -1,3 +1,4 @@
+# x86 OpenVINO EP backend (onnxruntime-node ^1.20.0, strict fail-open no WASM fallback)
 # Optimized variant of publish-9router.yml.
 #
 # Differences vs v1 (all optimizations are packaging/CI-level — the shipped
@@ -115,7 +116,8 @@ jobs:
       - name: Ensure engine deps present (retry transient optional-install gaps)
         run: |
           set -euo pipefail
-          PKGS="@huggingface/transformers @atjsh/llmlingua-2 js-tiktoken omniglyph safe-regex smol-toml"
+          # x86 EP: onnxruntime-node OpenVINO (strict, fail->null no WASM fallback)
+          PKGS="@huggingface/transformers @atjsh/llmlingua-2 js-tiktoken omniglyph onnxruntime-node safe-regex smol-toml tls-client-node"
           MISSING=""
           for p in $PKGS; do [ -d "node_modules/$p" ] || MISSING="$MISSING $p"; done
           if [ -n "$MISSING" ]; then
@@ -187,6 +189,7 @@ jobs:
             "smol-toml",
             "safe-regex",
             "tls-client-node",
+            "onnxruntime-node",
           ];
 
           /** Dev-only directory names — deleted wherever they sit inside node_modules. */
