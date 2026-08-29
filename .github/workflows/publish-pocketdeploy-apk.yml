@@ -116,7 +116,7 @@ jobs:
           mkdir -p "$ASSETS"
           cp -a "$STANDALONE"/. "$ASSETS"/
           if [ ! -f "$ASSETS/custom-server.js" ] && [ -f "_9router/custom-server.js" ]; then cp "_9router/custom-server.js" "$ASSETS"/; fi
-          find "$ASSETS" -maxdepth 3 -type f | head -30
+          (find "$ASSETS" -maxdepth 3 -type f 2>/dev/null | head -30 || true)
           du -sh "$ASSETS"
           test -f "$ASSETS/server.js" || test -f "$ASSETS/custom-server.js" || { echo "FATAL: no entry in assets/9router"; exit 1; }
 
