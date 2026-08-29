@@ -165,7 +165,7 @@ jobs:
         run: |
           set -euo pipefail
           APK="android/${{ env.APK }}"
-          unzip -l "$APK" | grep -E "assets/9router|assets/node-bionic|classes" | head -40
+          (unzip -l "$APK" | grep -E "assets/9router|assets/node-bionic|classes" | head -40 || true)
           if ! unzip -l "$APK" | grep -q "assets/node-bionic"; then echo "::warning::assets/node-bionic missing"; fi
           if ! unzip -l "$APK" | grep -q "assets/9router/server.js\|assets/9router/custom-server.js"; then echo "::error::assets/9router entry missing"; exit 1; fi
           du -sh "$APK"
