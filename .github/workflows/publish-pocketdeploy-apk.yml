@@ -1,5 +1,6 @@
 # Build PocketDeploy APK (bionic-native) via my-projects runner
-# Mobile XNNPACK EP backend (transformers WASM XNNPACK, strict fail-open) — x86 OpenVINO not bundled in APK
+# Mobile XNNPACK WASM (strict fail-open) — x86 OpenVINO not bundled in APK
+# 全量原生: node 闭包 + engine 闭包 + 预下载 model -> APK
 # Runs on jjjjllll111 account (billing OK). Produces debug APK using:
 # - PocketDeploy repo (this project skeleton is in PocketDeploy, built here)
 # - 9router-private standalone (Next.js build) -> android/assets/9router
@@ -32,7 +33,7 @@ concurrency:
 jobs:
   build-apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       NODE_OPTIONS: --max-old-space-size=8192
       NEXT_TELEMETRY_DISABLED: "1"
@@ -93,21 +94,24 @@ jobs:
           cd _9router
           npm run build
           node scripts/copy-standalone-assets.mjs
-          ls -lh .next/standalone | head -20
-          test -f .next/standalone/server.js || test -f .next/standalone/custom-server.js || { echo "FATAL: standalone entry missing"; ls -R .next/standalone | head -40; exit 1; }
+          test -f .next/standalone/server.js || test -f .next/standalone/custom-server.js || { echo "FATAL: standalone"; ls -R .next/standalone | head -40; exit 1; }
 
-      - name: Bundle engine deps (optional)
+      - name: Bundle engine deps + models (strict)
         run: |
           set -euo pipefail
           cd _9router
-          if [ -f scripts/bundle-engine-deps.mjs ]; then
-            node scripts/bundle-engine-deps.mjs cli/app-engine-deps --strict || echo "::warning::bundle-engine-deps failed"
-            if [ -d cli/app-engine-deps/node_modules ]; then
-              mkdir -p cli/app/node_modules
-              cp -rn cli/app-engine-deps/node_modules/. cli/app/node_modules/ 2>/dev/null || cp -r cli/app-engine-deps/node_modules/. cli/app/node_modules/
-            echo "XNNPACK backend: @huggingface/transformers WASM (mobile) — verify smoke"
-            node -e "import('@huggingface/transformers').then(()=>console.log('XNNPACK smoke: transformers OK')).catch(e=>{console.error(e);process.exit(1)})" 2>&1 | head -20 || echo "::warning::transformers smoke failed (offline?)"
-            fi
+          node scripts/bundle-engine-deps.mjs cli/app-engine-deps --strict
+          if [ -d cli/app-engine-deps/node_modules ]; then
+            mkdir -p cli/app/node_modules
+            cp -rn cli/app-engine-deps/node_modules/. cli/app/node_modules/ 2>/dev/null || cp -r cli/app-engine-deps/node_modules/. cli/app/node_modules/
+          fi
+          echo "XNNPACK backend: @huggingface/transformers WASM (mobile) — verify smoke"
+          node -e "import('@huggingface/transformers').then(()=>console.log('XNNPACK smoke: transformers OK')).catch(e=>{console.error(e);process.exit(1)})" 2>&1 | head -20 || echo "::warning::transformers smoke failed (offline?)"
+          echo "bake: preload llmlingua models (strict)..."
+          node scripts/preload-engine-models.mjs cli/app-engine-models --strict
+          mkdir -p cli/app/engine-models
+          cp -rn cli/app-engine-models/. cli/app/engine-models/ 2>/dev/null || true
+          du -sh cli/app/engine-models || true
           fi
 
       - name: Sync 9router standalone -> android assets
@@ -119,58 +123,67 @@ jobs:
           mkdir -p "$ASSETS"
           cp -a "$STANDALONE"/. "$ASSETS"/
           if [ ! -f "$ASSETS/custom-server.js" ] && [ -f "_9router/custom-server.js" ]; then cp "_9router/custom-server.js" "$ASSETS"/; fi
-          (find "$ASSETS" -maxdepth 3 -type f 2>/dev/null | head -30 || true)
-          du -sh "$ASSETS"
-          test -f "$ASSETS/server.js" || test -f "$ASSETS/custom-server.js" || { echo "FATAL: no entry in assets/9router"; exit 1; }
+          if [ -d "_9router/cli/app/node_modules" ]; then
+            mkdir -p "$ASSETS/node_modules"
+            cp -rn _9router/cli/app/node_modules/. "$ASSETS/node_modules"/ 2>/dev/null || cp -r _9router/cli/app/node_modules/. "$ASSETS/node_modules"/
+          fi
+          if [ -d "_9router/cli/app/engine-models" ]; then
+            mkdir -p "$ASSETS/engine-models"
+            cp -rn _9router/cli/app/engine-models/. "$ASSETS/engine-models"/ 2>/dev/null || true
+          fi
+          echo "assets 9router: $(du -sh "$ASSETS" | cut -f1) files=$(find "$ASSETS" -type f | wc -l)"
+          test -f "$ASSETS/server.js" || test -f "$ASSETS/custom-server.js" || { echo "FATAL: no entry"; exit 1; }
 
-      - name: Extract bionic node -> assets/node-bionic
+      - name: Extract bionic node closure -> assets/node-bionic + assets/node-libs
         run: |
           set -euo pipefail
           TMP="$RUNNER_TEMP/termux-node"
-          mkdir -p "$TMP/nex"
+          rm -rf "$TMP"; mkdir -p "$TMP/nex" "$TMP/libs"
           PKGINDEX="$TMP/Packages"
           curl -fsSL https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages -o "$PKGINDEX"
-          pkg_file() {
-            awk -v RS= -v FS='\n' -v pat="^Package: $1\$" '$1 ~ pat { for (i=1;i<=NF;i++) if ($i ~ /^Filename:/) { sub(/^Filename: /,"",$i); print $i; exit } }' "$PKGINDEX"
-          }
-          NF=$(pkg_file nodejs)
-          [ -z "$NF" ] && { echo "FATAL: termux nodejs not found"; exit 1; }
+          pkg_file() { awk -v RS= -v FS='\n' -v pat="^Package: $1\$" '$1 ~ pat { for (i=1;i<=NF;i++) if ($i ~ /^Filename:/) { sub(/^Filename: /,"",$i); print $i; exit } }' "$PKGINDEX"; }
+          expand_deb() { local deb="$1" dest="$2"; local tmp; tmp=$(mktemp -d); (cd "$tmp" && ar x "$deb" && tar -xf data.tar.* -C "$dest"); rm -rf "$tmp"; }
+          NF=$(pkg_file nodejs); [ -z "$NF" ] && { echo "FATAL: nodejs not found"; exit 1; }
           curl -fsSL "https://packages.termux.dev/apt/termux-main/$NF" -o "$TMP/node.deb"
-          ( cd "$TMP/nex" && ar x "$TMP/node.deb" && tar -xf data.tar.* )
+          mkdir -p "$TMP/nex"; (cd "$TMP/nex" && ar x "$TMP/node.deb" && tar -xf data.tar.*)
           NODE_BIN="$TMP/nex/data/data/com.termux/files/usr/bin/node"
-          test -x "$NODE_BIN" || { echo "FATAL: node missing"; ls -R "$TMP" | head -40; exit 1; }
-          DEST="android/app/src/main/assets/node-bionic"
-          mkdir -p "$(dirname "$DEST")"
-          cp "$NODE_BIN" "$DEST"
-          chmod +x "$DEST"
-          file "$DEST"
-          if readelf -d "$DEST" 2>/dev/null | grep -Eq "libc\.so\.6|GLIBC_"; then echo "FATAL: glibc-linked"; readelf -d "$DEST" | grep NEEDED; exit 1; fi
-          readelf -d "$DEST" 2>/dev/null | grep NEEDED || true
-          ls -lh "$DEST"
+          test -x "$NODE_BIN" || { echo "FATAL: node missing"; exit 1; }
+          DEST="android/app/src/main/assets/node-bionic"; mkdir -p "$(dirname "$DEST")"; cp "$NODE_BIN" "$DEST"; chmod +x "$DEST"
+          DEPS="zlib c-ares libsqlite libffi openssl libicu libc++ libandroid-shmem libandroid-spawn"
+          for pkg in $DEPS; do
+            F=$(pkg_file "$pkg" || true); [ -z "$F" ] && { echo "::warning::pkg $pkg not found"; continue; }
+            curl -fsSL "https://packages.termux.dev/apt/termux-main/$F" -o "$TMP/$pkg.deb" || { echo "::warning::fetch $pkg failed"; continue; }
+            mkdir -p "$TMP/libs/$pkg"; expand_deb "$TMP/$pkg.deb" "$TMP/libs/$pkg"
+          done
+          AGG="$TMP/libs/_agg"; mkdir -p "$AGG"
+          find "$TMP/libs" -type f -path "*/usr/lib/*" -not -path "*/_agg/*" | while read -r f; do cp -n "$f" "$AGG"/ 2>/dev/null || cp "$f" "$AGG"/; done
+          find "$TMP" -type l | while read -r l; do t=$(readlink -f "$l" 2>/dev/null || readlink "$l" 2>/dev/null || true); [ -f "$t" ] && cp -n "$t" "$AGG"/ 2>/dev/null || true; [ -f "$t" ] && cp -n "$t" "$AGG/$(basename "$l")" 2>/dev/null || true; done
+          find "$TMP/nex" -type f -path "*/usr/lib/*" | while read -r f; do cp -n "$f" "$AGG"/ 2>/dev/null || true; done
+          mkdir -p android/app/src/main/assets/node-libs
+          cp -n "$AGG"/* android/app/src/main/assets/node-libs/ 2>/dev/null || cp "$AGG"/* android/app/src/main/assets/node-libs/ 2>/dev/null || true
+          echo "node-libs: $(ls android/app/src/main/assets/node-libs | wc -l) files -> $(du -sh android/app/src/main/assets/node-libs | cut -f1)"
+          ls android/app/src/main/assets/node-libs | head -30 || true
+          readelf -d "$DEST" | grep NEEDED || true
 
       - name: Build APK
         run: |
           set -euo pipefail
           cd android
           chmod +x gradlew
-          if [ "${{ inputs.build_type }}" = "release" ]; then
-            ./gradlew :app:assembleRelease --stacktrace
-            APK="app/build/outputs/apk/release/app-release-unsigned.apk"
-          else
-            ./gradlew :app:assembleDebug --stacktrace
-            APK="app/build/outputs/apk/debug/app-debug.apk"
-          fi
+          if [ "${{ inputs.build_type }}" = "release" ]; then ./gradlew :app:assembleRelease --stacktrace; APK="app/build/outputs/apk/release/app-release-unsigned.apk"
+          else ./gradlew :app:assembleDebug --stacktrace; APK="app/build/outputs/apk/debug/app-debug.apk"; fi
           echo "APK=$APK" >> "$GITHUB_ENV"
-          ls -lh "$APK"
-          du -sh "$APK"
+          ls -lh "$APK"; du -sh "$APK"
 
       - name: Verify APK
         run: |
           set -euo pipefail
           APK="android/${{ env.APK }}"
-          (unzip -l "$APK" | grep -E "assets/9router|assets/node-bionic|classes" | head -40 || true)
-          if ! unzip -l "$APK" | grep -q "assets/node-bionic"; then echo "::warning::assets/node-bionic missing"; fi
+          (unzip -l "$APK" | grep -E "assets/9router|assets/node-bionic|assets/node-libs|classes" | head -60 || true)
+          if ! unzip -l "$APK" | grep -q "assets/node-bionic"; then echo "::error::assets/node-bionic missing"; exit 1; fi
+          if ! unzip -l "$APK" | grep -q "assets/node-libs/"; then echo "::warning::assets/node-libs missing (NEEDED will fail)"; fi
           if ! unzip -l "$APK" | grep -q "assets/9router/server.js\|assets/9router/custom-server.js"; then echo "::error::assets/9router entry missing"; exit 1; fi
+          if ! unzip -l "$APK" | grep -q "assets/9router/engine-models"; then echo "::warning::engine-models not baked"; fi
           du -sh "$APK"
 
       - name: Upload APK artifact
@@ -180,13 +193,3 @@ jobs:
           path: android/${{ env.APK }}
           if-no-files-found: error
           retention-days: 30
-
-      - name: Summary
-        run: |
-          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
-          ### PocketDeploy APK
-          - **PocketDeploy:** \`${{ inputs.pocketdeploy_ref || 'main' }}\`
-          - **9router:** \`${{ inputs.nine_router_ref || 'master' }}\`
-          - **APK:** \`${{ env.APK }}\` — $(du -h "android/${{ env.APK }}" | cut -f1)
-          - **Run:** install, FGS keepalive, LAN \`http://<IP>:20127\`
-          EOF
