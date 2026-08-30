@@ -1,4 +1,3 @@
-# x86 OpenVINO EP backend (onnxruntime-node ^1.20.0, strict fail-open no WASM fallback)
 # Optimized variant of publish-9router.yml.
 #
 # Differences vs v1 (all optimizations are packaging/CI-level — the shipped
@@ -116,7 +115,6 @@ jobs:
       - name: Ensure engine deps present (retry transient optional-install gaps)
         run: |
           set -euo pipefail
-          # x86 EP: onnxruntime-node OpenVINO (strict, fail->null no WASM fallback)
           PKGS="@huggingface/transformers @atjsh/llmlingua-2 js-tiktoken omniglyph onnxruntime-node safe-regex smol-toml tls-client-node"
           MISSING=""
           for p in $PKGS; do [ -d "node_modules/$p" ] || MISSING="$MISSING $p"; done
@@ -438,6 +436,12 @@ jobs:
           echo "file count    : $(find cli/app -type f | wc -l)"
           ls -la cli/app/ | head -15
 
+      - name: Cleanup temp dirs before archive
+        run: |
+          set -euo pipefail
+          rm -rf cli/app-engine-deps cli/app-engine-models cli/app/cli cli/app/.next 2>/dev/null || true
+          echo "✓ Temp dirs cleaned"
+
       - name: Create distribution archive (parallel gzip)
         run: |
           set -euo pipefail
@@ -447,14 +451,17 @@ jobs:
             [ -e "$f" ] && FILES="$FILES $f"
           done
           echo "Packing:$FILES"
+          du -sh app app/node_modules app/engine-models 2>/dev/null || true
           if command -v pigz >/dev/null 2>&1; then
-            tar -cf - $FILES | pigz -9 > ../9router-cli.tar.gz
+            tar --exclude='app/node_modules/.cache' --exclude='app/.next' --exclude='app/cli' -cf - $FILES | pigz -9 > ../9router-cli.tar.gz
           else
-            tar -cf - $FILES | gzip -9 > ../9router-cli.tar.gz
+            tar --exclude='app/node_modules/.cache' --exclude='app/.next' --exclude='app/cli' -cf - $FILES | gzip -9 > ../9router-cli.tar.gz
           fi
           cd ..
           ARCHIVE_SIZE=$(du -h 9router-cli.tar.gz | cut -f1)
           echo "✓ Archive created: 9router-cli.tar.gz (${ARCHIVE_SIZE})"
+          tar tzf 9router-cli.tar.gz | head -n 50
+          echo "total entries: $(tar tzf 9router-cli.tar.gz | wc -l)"
 
       - name: Upload to GitHub Release
         env:
