@@ -451,17 +451,29 @@ jobs:
             [ -e "$f" ] && FILES="$FILES $f"
           done
           echo "Packing:$FILES"
-          du -sh app app/node_modules app/engine-models 2>/dev/null || true
+          # Guard: onnxruntime-node was already excluded from bundle — verify not re-added
+          if [ -d "app/node_modules/onnxruntime-node" ]; then echo "::warning::onnxruntime-node still in app (should be baked separately)"; ls -lh app/node_modules/onnxruntime-node | head -5; fi
+          du -sh app 2>/dev/null || true
+          du -sh app/node_modules 2>/dev/null || true
+          du -sh app/engine-models 2>/dev/null || true
+          du -sh app/.next-cli-build 2>/dev/null || true
+          echo "files in app: $(find app -type f | wc -l) files in engine-models: $(find app/engine-models -type f 2>/dev/null | wc -l || echo 0)"
+          set +o pipefail
           if command -v pigz >/dev/null 2>&1; then
             tar --exclude='app/node_modules/.cache' --exclude='app/.next' --exclude='app/cli' -cf - $FILES | pigz -9 > ../9router-cli.tar.gz
           else
             tar --exclude='app/node_modules/.cache' --exclude='app/.next' --exclude='app/cli' -cf - $FILES | gzip -9 > ../9router-cli.tar.gz
           fi
+          set -o pipefail
           cd ..
           ARCHIVE_SIZE=$(du -h 9router-cli.tar.gz | cut -f1)
           echo "✓ Archive created: 9router-cli.tar.gz (${ARCHIVE_SIZE})"
-          tar tzf 9router-cli.tar.gz | head -n 50
-          echo "total entries: $(tar tzf 9router-cli.tar.gz | wc -l)"
+          echo "--- archive head ---"
+          tar tzf 9router-cli.tar.gz | head -n 50 || true
+          echo "--- archive tail ---"
+          tar tzf 9router-cli.tar.gz | tail -n 20 || true
+          echo "total entries: $(tar tzf 9router-cli.tar.gz 2>&1 | wc -l || echo '?')"
+          echo "uncompressed bytes: $(tar tzf 9router-cli.tar.gz 2>&1 | head -1 || true)"
 
       - name: Upload to GitHub Release
         env:
