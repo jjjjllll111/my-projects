@@ -295,12 +295,12 @@ jobs:
       - name: Verify APK pre-flight (STRICT SEA — fail fast, no fallback)
         run: |
           set -euo pipefail
-          echo "=== assets preview ==="; ls -lh android/app/src/main/assets/ 2>&1 | head -30; ls android/app/src/main/assets/node-libs 2>&1 | head -20; ls android/app/src/main/jniLibs/arm64-v8a/ 2>&1 | head -20
+          echo "=== assets preview ==="; ls -lh android/app/src/main/assets/ 2>&1 | head -30; ls android/app/src/main/assets/node-libs 2>&1 | head -20; ls android/app/src/main/jniLibs/arm64-v8a/ 2>&1 | head -20; echo "--- du ---"; du -sh android/app/src/main/assets/9router 2>&1 | head -5 || true; du -sh android/app/src/main/assets/node-libs 2>&1 | head -5 || true; du -sh android/app/src/main/assets/myapp 2>&1 | head -5 || true; du -sh android/app/src/main/assets 2>&1 | head -5 || true
           test -f android/app/src/main/assets/myapp || { echo "::error::STRICT: assets/myapp missing (SEA build failed)"; exit 1; }
           test -f android/app/src/main/jniLibs/arm64-v8a/libmyapp.so || { echo "::error::STRICT: jniLibs libmyapp.so missing"; exit 1; }
           file android/app/src/main/assets/myapp 2>&1 | head -5 || true
           # Ensure no legacy node-bionic is mistaken for success — SEA must be present
-          if ! file android/app/src/main/assets/myapp | grep -q "ELF.*AArch64"; then echo "::error::myapp is not AArch64 ELF"; exit 1; fi
+          if ! file android/app/src/main/assets/myapp | grep -qi "aarch64"; then echo "::error::myapp is not AArch64 ELF"; exit 1; fi
 
       - name: Build APK (Gradle)
         run: |
@@ -324,7 +324,7 @@ jobs:
           if unzip -l "$APK" | grep -q "assets/node-bionic"; then echo "::notice::legacy assets/node-bionic still in APK (ignored at runtime)"; fi
           if ! unzip -l "$APK" | grep -q "assets/9router/server.js\|assets/9router/custom-server.js"; then echo "::error::assets/9router entry missing"; exit 1; fi
           if ! unzip -l "$APK" | grep -q "assets/9router/engine-models"; then echo "::error::STRICT: engine-models not baked (offline llmlingua missing)"; exit 1; fi
-          if unzip -p "$APK" "assets/myapp" > /tmp/_apk_myapp 2>/dev/null && [ -s /tmp/_apk_myapp ]; then echo "myapp in APK:"; file /tmp/_apk_myapp | head -5; readelf -h /tmp/_apk_myapp 2>&1 | head -10 || true; if ! file /tmp/_apk_myapp | grep -q "ELF.*AArch64"; then echo "::error::myapp in APK is not AArch64 ELF"; exit 1; fi; fi
+          if unzip -p "$APK" "assets/myapp" > /tmp/_apk_myapp 2>/dev/null && [ -s /tmp/_apk_myapp ]; then echo "myapp in APK:"; file /tmp/_apk_myapp | head -5; readelf -h /tmp/_apk_myapp 2>&1 | head -10 || true; if ! file /tmp/_apk_myapp | grep -qi "aarch64"; then echo "::error::myapp in APK is not AArch64 ELF"; exit 1; fi; fi
           du -sh "$APK"
 
       - name: Upload APK artifact
