@@ -31,6 +31,7 @@ on:
         description: Build Node.js from source via NDK (slow, else Termux prebuilt bionic ELF)
         required: false
         default: "false"
+      - ".android-toolchain/**"
 
 permissions:
   contents: read
@@ -238,7 +239,7 @@ jobs:
           # For true single-file SEA, assets would be embedded via sea-config.json assets field;
           # here we embed the bootstrap and keep large models external to avoid blob size limits.
           WORK="_9router/cli/app"
-          cat > "$RUNNER_TEMP/sea-entry.js" <<'SEA_ENTRY'
+          cat > "$RUNNER_TEMP/sea-entry.mjs" <<'SEA_ENTRY'
           // SEA entry — Node.js Single Executable bootstrap (baked via NDK/Bionic ELF)
           // Full deps + models are baked: engine deps at ./node_modules, models at ./engine-models
           // Standalone Next.js entry is at workDir/custom-server.js or server.js (extracted from APK assets)
@@ -251,15 +252,15 @@ jobs:
           console.log("SEA myapp ->", entry, "execPath=", process.execPath);
           await import(entry);
           SEA_ENTRY
-          cat "$RUNNER_TEMP/sea-entry.js"
+          cat "$RUNNER_TEMP/sea-entry.mjs"
 
           cat > "$RUNNER_TEMP/sea-config.json" <<SEA_JSON
           {
-            "main": "$RUNNER_TEMP/sea-entry.js",
+            "main": "$RUNNER_TEMP/sea-entry.mjs",
             "output": "$RUNNER_TEMP/sea-prep.blob",
             "disableExperimentalSEAWarning": true,
             "useSnapshot": false,
-            "useCodeCache": true
+            "useCodeCache": false
           }
           SEA_JSON
           cat "$RUNNER_TEMP/sea-config.json"
