@@ -192,38 +192,21 @@ jobs:
           file "$RUNNER_TEMP/sea-host/node-bionic"; readelf -h "$RUNNER_TEMP/sea-host/node-bionic" | head -20 || true
           # Also produce legacy assets/node-bionic + node-libs for fallback
           DEST="android/app/src/main/assets/node-bionic"; mkdir -p "$(dirname "$DEST")"; cp "$NODE_BIN" "$DEST"; chmod +x "$DEST"
-          # Termux Packages: libc++ is versioned (libc++_29) but node NEEDED is libc++_shared.so
-          DEPS="zlib c-ares libsqlite libffi openssl libicu libc++ libandroid-shmem libandroid-spawn"
-          for pkg in $DEPS; do
-            F=$(pkg_file "$pkg" || true)
-            if [ -z "$F" ]; then
-              # Fallback for versioned libc++: try libc++_29
-              if [ "$pkg" = "libc++" ]; then F=$(pkg_file "libc++_29" || true); fi
-            fi
-            [ -z "$F" ] && { echo "::warning::pkg $pkg not found (F empty)"; continue; }
-            echo "fetch $pkg -> $F"
-            curl -fsSL "https://packages.termux.dev/apt/termux-main/$F" -o "$TMP/$pkg.deb" || { echo "::warning::fetch $pkg failed"; continue; }
-            mkdir -p "$TMP/libs/$pkg"; expand_deb "$TMP/$pkg.deb" "$TMP/libs/$pkg"
-          done
+          DEPS="zlib c-ares libsqlite libffi openssl libicu libc++_29 libandroid-shmem libandroid-spawn"
+          for pkg in $DEPS; do F=$(pkg_file "$pkg" || true); [ -z "$F" ] && { echo "::warning::pkg $pkg not found"; continue; }; echo "fetch $pkg -> $F"; curl -fsSL "https://packages.termux.dev/apt/termux-main/$F" -o "$TMP/$pkg.deb" || { echo "::warning::fetch $pkg failed"; continue; }; mkdir -p "$TMP/libs/$pkg"; expand_deb "$TMP/$pkg.deb" "$TMP/libs/$pkg"; done
           AGG="$TMP/libs/_agg"; mkdir -p "$AGG"
-          # Collect all .so files recursively (also .so.X / .so.X.Y)
-          find "$TMP/libs" -type f \( -name "*.so*" -o -path "*/usr/lib/*" \) -not -path "*/_agg/*" | while read -r f; do cp -n "$f" "$AGG"/ 2>/dev/null || cp "$f" "$AGG"/; done
-          find "$TMP/libs" -type f -name "*.so*" | while read -r f; do cp -n "$(basename "$f")" "$AGG/$(basename "$f")" 2>/dev/null || true; done
-          # Resolve symlinks -> real files under _agg
-          find "$TMP" -type l | while read -r l; do t=$(readlink -f "$l" 2>/dev/null || readlink "$l" 2>/dev/null || true); [ -f "$t" ] && cp -n "$t" "$AGG"/ 2>/dev/null || true; [ -f "$t" ] && cp -n "$t" "$AGG/$(basename "$l")" 2>/dev/null || true; done
-          find "$TMP/nex" -type f -path "*/usr/lib/*" | while read -r f; do cp -n "$f" "$AGG"/ 2>/dev/null || true; done
-          # Ensure NEEDED is satisfied: warn if any NEEDED missing from _agg
-          echo "AGG libs:"; ls "$AGG" | head -40 || true
-          for so in $(readelf -d "$DEST" | grep -oP '(?<=Shared library: \[)[^\]]+'); do
-            case "$so" in libc.so|libdl.so|libm.so) continue;; esac
-            if [ ! -f "$AGG/$so" ]; then echo "::warning:: NEEDED $so NOT in AGG (will fail at runtime)"; ls "$AGG" | grep -i "${so%%.*}" | head -5 || true; fi
-          done
-          # Also handle legacy .pc filtering: set executable on .so only
-          chmod 644 "$AGG"/*.so* 2>/dev/null || true
-          mkdir -p android/app/src/main/assets/node-libs; cp -n "$AGG"/* android/app/src/main/assets/node-libs/ 2>/dev/null || cp "$AGG"/* android/app/src/main/assets/node-libs/ 2>/dev/null || true
+          find "$TMP/libs" -type f -name "*.so*" -not -path "*/_agg/*" | while read -r f; do cp -n "$f" "$AGG"/ 2>/dev/null || cp "$f" "$AGG"/; done
+          find "$TMP/nex" -type f -name "*.so*" | while read -r f; do cp -n "$f" "$AGG"/ 2>/dev/null || true; done
+          # Handle symlinked versioned libs (libicu.so -> libicu.so.78 etc)
+          find "$TMP/libs" "$TMP/nex" -type l -name "*.so*" 2>/dev/null | while read -r l; do t=$(readlink -f "$l" 2>/dev/null || readlink "$l" 2>/dev/null || true); [ -f "$t" ] && cp -n "$t" "$AGG/$(basename "$l")" 2>/dev/null || true; [ -f "$t" ] && cp -n "$t" "$AGG/$(basename "$t")" 2>/dev/null || true; done
+          echo "AGG libs:"; ls "$AGG" | tr ' ' '\n' | sort | head -40 || true
+          # Also copy libc++_shared.so explicitly (NEEDED name differs from package file name libc++_29)
+          if ls "$AGG"/libc++* >/dev/null 2>&1; then for f in "$AGG"/libc++*; do echo "libc++ candidate: $(basename "$f") $(file "$f" | cut -d: -f2)"; done; fi
+          if [ ! -f "$AGG/libc++_shared.so" ]; then for f in "$AGG"/*c++*; do if file "$f" 2>&1 | grep -qi "shared object.*aarch64"; then echo "mapping $f -> libc++_shared.so"; cp -a "$f" "$AGG/libc++_shared.so"; break; fi; done; fi
+          for so in $(readelf -d "$DEST" | grep -oP '(?<=Shared library: \[)[^\]]+'); do case "$so" in libc.so|libdl.so|libm.so) continue;; esac; if [ ! -f "$AGG/$so" ]; then echo "::error::NEEDED $so MISSING in AGG"; fi; done
+          mkdir -p android/app/src/main/assets/node-libs; cp -a "$AGG"/* android/app/src/main/assets/node-libs/ 2>/dev/null || true
           echo "node-libs staged: $(ls android/app/src/main/assets/node-libs | wc -l) files -> $(du -sh android/app/src/main/assets/node-libs | cut -f1)"
           readelf -d "$DEST" | grep NEEDED || true
-          # Stash libs for SEA LD_LIBRARY_PATH alongside myapp
           mkdir -p "$RUNNER_TEMP/sea-libs"; cp -a "$AGG"/* "$RUNNER_TEMP/sea-libs"/ 2>/dev/null || true
           echo "SEA host + libs ready: $(ls "$RUNNER_TEMP/sea-libs" | wc -l) libs"
 
@@ -321,29 +304,24 @@ jobs:
         run: |
           set -euo pipefail
           # headroom proxy+code: always latest, baked wheels + pre-downloaded hf model
-          # Deterministic latest: no cache, pip --no-cache, hf snapshot to engine-models alt dir
           python3 -m pip install -U pip wheel --quiet
           python3 -m pip wheel --no-cache-dir -w "$RUNNER_TEMP/headroom-wheels" "headroom-ai[proxy,code]" 2>&1 | tail -20
           ls -lh "$RUNNER_TEMP/headroom-wheels" | head -30 || true
           echo "headroom wheels: $(ls "$RUNNER_TEMP/headroom-wheels" | wc -l) files"
           # Pre-download Kompress-v2-base (hf) — offline baked, skip torch (device pkg install)
-          python3 -m pip install -q "huggingface_hub[hf_transfer]" 2>&1 | tail -5
-          HF_ROOT="$RUNNER_TEMP/hf-headroom"
+          python3 -m pip install -q huggingface_hub 2>&1 | tail -5
+          export HF_ROOT="$RUNNER_TEMP/hf-headroom"
           mkdir -p "$HF_ROOT"
-          # Use hf download with local-dir layout; fallback to snapshot_download via python
-          if command -v hf >/dev/null 2>&1; then
-            hf download chopratejas/kompress-v2-base --local-dir "$HF_ROOT/kompress-v2-base" --local-dir-use-symlinks False 2>&1 | tail -20 || true
-          fi
-          if [ ! -f "$HF_ROOT/kompress-v2-base/config.json" ]; then
-            python3 <<'PY'
+          # Use snapshot_download (handles HF_ROOT correctly, no --local-dir-use-symlinks)
+          HF_ROOT="$HF_ROOT" python3 <<'PY'
           from huggingface_hub import snapshot_download
           import os
           repo="chopratejas/kompress-v2-base"
-          dst=os.environ.get("HF_ROOT","/tmp/hf-headroom")+"/kompress-v2-base"
-          snapshot_download(repo_id=repo, local_dir=dst, local_dir_use_symlinks=False, tqdm_class=None)
+          dst=os.path.join(os.environ["HF_ROOT"], "kompress-v2-base")
+          snapshot_download(repo_id=repo, local_dir=dst, tqdm_class=None)
           print("hf snapshot done", dst)
+          import pathlib; print("model files:", len(list(pathlib.Path(dst).rglob("*"))))
           PY
-          fi
           du -sh "$HF_ROOT/kompress-v2-base" 2>&1 | head -5 || true
           ls "$HF_ROOT/kompress-v2-base" | head -20 || true
           # Stage for APK: assets/headroom/wheels + assets/headroom/models/kompress-v2-base
@@ -351,9 +329,8 @@ jobs:
           rm -rf "$ASSET_HR"; mkdir -p "$ASSET_HR/wheels" "$ASSET_HR/models"
           cp -a "$RUNNER_TEMP/headroom-wheels"/* "$ASSET_HR/wheels"/ 2>/dev/null || true
           cp -a "$HF_ROOT/kompress-v2-base" "$ASSET_HR/models"/ 2>/dev/null || true
-          # Also bake python slim (mise will provide python if needed, but wheels need interpreter)
           echo "headroom staged: wheels=$(du -sh "$ASSET_HR/wheels" | cut -f1) models=$(du -sh "$ASSET_HR/models" | cut -f1) total=$(du -sh "$ASSET_HR" | cut -f1) files=$(find "$ASSET_HR" -type f | wc -l)"
-          ls "$ASSET_HR/wheels" | wc -l; ls "$ASSET_HR/models/kompress-v2-base" | head -10 || true
+          ls "$ASSET_HR/wheels" | wc -l; ls "$ASSET_HR/models/kompress-v2-base" | head -20 || true
 
       - name: Verify APK pre-flight (STRICT SEA — fail fast, no fallback)
         run: |
