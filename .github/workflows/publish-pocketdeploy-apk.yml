@@ -31,7 +31,6 @@ on:
         description: Build Node.js from source via NDK (slow, else Termux prebuilt bionic ELF)
         required: false
         default: "false"
-      - ".android-toolchain/**"
 
 permissions:
   contents: read
