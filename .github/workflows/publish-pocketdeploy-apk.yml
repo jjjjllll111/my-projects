@@ -28,6 +28,7 @@ on:
         description: Build Node.js from source via NDK (slow, else Termux prebuilt bionic ELF)
         required: false
         default: "false"
+  push:
     branches: [main, stable/lanserve-omniroute]
     paths:
       - "android/**"
@@ -105,7 +106,7 @@ jobs:
           cd _9router
           npm run build
           node scripts/copy-standalone-assets.mjs
-          test -f .next/standalone/server.js || test -f .next/standalone/custom-server.js || { echo "FATAL: standalone entry missing"; ls -R .next/standalone | head -40; exit 1; }
+          test -f .next/standalone/server.js || test -f .next/standalone/custom-server.js || { echo "FATAL: standalone entry missing"; ls -R .next/standalone | head -40 || true; exit 1; }
 
       - name: Bundle engine deps + models (strict, full bake)
         run: |
@@ -188,7 +189,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/sea-host"
           cp "$NODE_BIN" "$RUNNER_TEMP/sea-host/node-bionic"
           chmod +x "$RUNNER_TEMP/sea-host/node-bionic"
-          file "$RUNNER_TEMP/sea-host/node-bionic"; readelf -h "$RUNNER_TEMP/sea-host/node-bionic" | head -20
+          file "$RUNNER_TEMP/sea-host/node-bionic"; readelf -h "$RUNNER_TEMP/sea-host/node-bionic" | head -20 || true
           # Also produce legacy assets/node-bionic + node-libs for fallback
           DEST="android/app/src/main/assets/node-bionic"; mkdir -p "$(dirname "$DEST")"; cp "$NODE_BIN" "$DEST"; chmod +x "$DEST"
           # Termux Packages: libc++ is versioned (libc++_29) but node NEEDED is libc++_shared.so
@@ -212,7 +213,7 @@ jobs:
           find "$TMP" -type l | while read -r l; do t=$(readlink -f "$l" 2>/dev/null || readlink "$l" 2>/dev/null || true); [ -f "$t" ] && cp -n "$t" "$AGG"/ 2>/dev/null || true; [ -f "$t" ] && cp -n "$t" "$AGG/$(basename "$l")" 2>/dev/null || true; done
           find "$TMP/nex" -type f -path "*/usr/lib/*" | while read -r f; do cp -n "$f" "$AGG"/ 2>/dev/null || true; done
           # Ensure NEEDED is satisfied: warn if any NEEDED missing from _agg
-          echo "AGG libs:"; ls "$AGG" | head -40
+          echo "AGG libs:"; ls "$AGG" | head -40 || true
           for so in $(readelf -d "$DEST" | grep -oP '(?<=Shared library: \[)[^\]]+'); do
             case "$so" in libc.so|libdl.so|libm.so) continue;; esac
             if [ ! -f "$AGG/$so" ]; then echo "::warning:: NEEDED $so NOT in AGG (will fail at runtime)"; ls "$AGG" | grep -i "${so%%.*}" | head -5 || true; fi
@@ -252,7 +253,7 @@ jobs:
         run: |
           set -euo pipefail
           HOST_BIN="$RUNNER_TEMP/sea-host/node-bionic"
-          test -x "$HOST_BIN" || { echo "FATAL: sea host missing"; ls -R "$RUNNER_TEMP" | head -50; exit 1; }
+          test -x "$HOST_BIN" || { echo "FATAL: sea host missing"; ls -R "$RUNNER_TEMP" | head -50 || true; exit 1; }
           file "$HOST_BIN"; readelf -h "$HOST_BIN" | grep -q "AArch64" || echo "::warning::host not AArch64"
           if readelf -d "$HOST_BIN" | grep -Eq "libc\.so\.6|GLIBC_"; then echo "FATAL: host is glibc, not bionic"; exit 1; fi
           echo "NEEDED host:"; readelf -d "$HOST_BIN" | grep NEEDED || true
@@ -323,7 +324,7 @@ jobs:
           # Deterministic latest: no cache, pip --no-cache, hf snapshot to engine-models alt dir
           python3 -m pip install -U pip wheel --quiet
           python3 -m pip wheel --no-cache-dir -w "$RUNNER_TEMP/headroom-wheels" "headroom-ai[proxy,code]" 2>&1 | tail -20
-          ls -lh "$RUNNER_TEMP/headroom-wheels" | head -30
+          ls -lh "$RUNNER_TEMP/headroom-wheels" | head -30 || true
           echo "headroom wheels: $(ls "$RUNNER_TEMP/headroom-wheels" | wc -l) files"
           # Pre-download Kompress-v2-base (hf) — offline baked, skip torch (device pkg install)
           python3 -m pip install -q "huggingface_hub[hf_transfer]" 2>&1 | tail -5
@@ -344,7 +345,7 @@ jobs:
           PY
           fi
           du -sh "$HF_ROOT/kompress-v2-base" 2>&1 | head -5 || true
-          ls "$HF_ROOT/kompress-v2-base" | head -20
+          ls "$HF_ROOT/kompress-v2-base" | head -20 || true
           # Stage for APK: assets/headroom/wheels + assets/headroom/models/kompress-v2-base
           ASSET_HR="android/app/src/main/assets/headroom"
           rm -rf "$ASSET_HR"; mkdir -p "$ASSET_HR/wheels" "$ASSET_HR/models"
@@ -357,7 +358,7 @@ jobs:
       - name: Verify APK pre-flight (STRICT SEA — fail fast, no fallback)
         run: |
           set -euo pipefail
-          echo "=== assets preview ==="; ls -lh android/app/src/main/assets/ 2>&1 | head -30; ls android/app/src/main/assets/node-libs 2>&1 | head -20; ls android/app/src/main/jniLibs/arm64-v8a/ 2>&1 | head -20; echo "--- du ---"; du -sh android/app/src/main/assets/9router 2>&1 | head -5 || true; du -sh android/app/src/main/assets/node-libs 2>&1 | head -5 || true; du -sh android/app/src/main/assets/myapp 2>&1 | head -5 || true; du -sh android/app/src/main/assets 2>&1 | head -5 || true
+          echo "=== assets preview ==="; ls -lh android/app/src/main/assets/ 2>&1 | head -30 || true; ls android/app/src/main/assets/node-libs 2>&1 | head -20 || true; ls android/app/src/main/jniLibs/arm64-v8a/ 2>&1 | head -20 || true; echo "--- du ---"; du -sh android/app/src/main/assets/9router 2>&1 | head -5 || true; du -sh android/app/src/main/assets/node-libs 2>&1 | head -5 || true; du -sh android/app/src/main/assets/myapp 2>&1 | head -5 || true; du -sh android/app/src/main/assets 2>&1 | head -5 || true
           test -f android/app/src/main/assets/myapp || { echo "::error::STRICT: assets/myapp missing (SEA build failed)"; exit 1; }
           test -f android/app/src/main/jniLibs/arm64-v8a/libmyapp.so || { echo "::error::STRICT: jniLibs libmyapp.so missing"; exit 1; }
           file android/app/src/main/assets/myapp 2>&1 | head -5 || true
@@ -379,14 +380,14 @@ jobs:
           set -euo pipefail
           APK="android/${{ env.APK }}"
           echo "=== APK contents (assets/jniLibs) ==="
-          (unzip -l "$APK" | grep -E "assets/9router|assets/myapp|assets/node-bionic|assets/node-libs|lib/arm64-v8a/libmyapp|classes" | head -80 || true)
+          (unzip -l "$APK" | grep -E "assets/9router|assets/myapp|assets/headroom|assets/node-bionic|assets/node-libs|lib/arm64-v8a/libmyapp|classes" | head -80 || true)
           if ! unzip -l "$APK" | grep -q "assets/myapp"; then echo "::error::STRICT: assets/myapp missing in APK (SEA injection failed)"; exit 1; fi
           if ! unzip -l "$APK" | grep -q "lib/arm64-v8a/libmyapp.so"; then echo "::error::STRICT: lib/arm64-v8a/libmyapp.so missing in APK"; exit 1; fi
           # Legacy node-bionic must NOT be relied on — if present it's just dead weight, warn but not required
           if unzip -l "$APK" | grep -q "assets/node-bionic"; then echo "::notice::legacy assets/node-bionic still in APK (ignored at runtime)"; fi
           if ! unzip -l "$APK" | grep -q "assets/9router/server.js\|assets/9router/custom-server.js"; then echo "::error::assets/9router entry missing"; exit 1; fi
           if ! unzip -l "$APK" | grep -q "assets/9router/engine-models"; then echo "::error::STRICT: engine-models not baked (offline llmlingua missing)"; exit 1; fi
-          if unzip -p "$APK" "assets/myapp" > /tmp/_apk_myapp 2>/dev/null && [ -s /tmp/_apk_myapp ]; then echo "myapp in APK:"; file /tmp/_apk_myapp | head -5; readelf -h /tmp/_apk_myapp 2>&1 | head -10 || true; if ! file /tmp/_apk_myapp | grep -qi "aarch64"; then echo "::error::myapp in APK is not AArch64 ELF"; exit 1; fi; fi
+          if unzip -p "$APK" "assets/myapp" > /tmp/_apk_myapp 2>/dev/null && [ -s /tmp/_apk_myapp ]; then echo "myapp in APK:"; file /tmp/_apk_myapp | head -5 || true; readelf -h /tmp/_apk_myapp 2>&1 | head -10 || true; if ! file /tmp/_apk_myapp | grep -qi "aarch64"; then echo "::error::myapp in APK is not AArch64 ELF"; exit 1; fi; fi
           du -sh "$APK"
 
       - name: Upload APK artifact
