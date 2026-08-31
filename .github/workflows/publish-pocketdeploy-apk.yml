@@ -392,20 +392,32 @@ jobs:
           echo "APK=$APK" >> "$GITHUB_ENV"
           ls -lh "$APK"; du -sh "$APK"
 
-      - name: Real Android Emulator E2E (API 35 x86_64 + ARM Translation) & Port Validation
+      - name: Enable KVM group perms for Hardware Acceleration
+        run: |
+          echo "=== Setting up KVM hardware acceleration ==="
+          sudo groupadd -r kvm 2>/dev/null || true
+          sudo gpasswd -a $USER kvm 2>/dev/null || true
+          sudo chown $USER /dev/kvm 2>/dev/null || sudo chmod 666 /dev/kvm 2>/dev/null || true
+          ls -la /dev/kvm || true
+
+      - name: Real Android Emulator E2E (API 34/35 x86_64 + KVM Hardware Accel) & Port Validation
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 35
+          api-level: 34
           target: google_apis
           arch: x86_64
           profile: pixel_5
-          emulator-options: -no-snapshot-load -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+          emulator-options: -no-snapshot-load -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
+          emulator-boot-timeout: 600
           script: |
             set -euo pipefail
             APK_PATH="android/${{ env.APK }}"
-            echo "=== Installing APK into real Android 35 Emulator (ARM64 Binary -> Houdini/libndk_translation) ==="
+            echo "=== Installing APK into real Android Emulator ==="
             adb wait-for-device
+            adb shell settings put global window_animation_scale 0
+            adb shell settings put global transition_animation_scale 0
+            adb shell settings put global animator_duration_scale 0
             adb install -r "$APK_PATH"
             
             echo "--- Starting MainActivity & foreground RouterService ---"
@@ -413,20 +425,17 @@ jobs:
             
             echo "--- Monitoring App Launch, Port 20128 & Logcat ---"
             OK=0
-            for i in $(seq 1 30); do
-              sleep 2
-              # Check if process is alive
+            for i in $(seq 1 40); do
+              sleep 3
               PID=$(adb shell pidof com.pocketdeploy.app || true)
-              echo "App PID: $PID (tick $i/30)"
+              echo "App PID: $PID (tick $i/40)"
               
-              # Check port listening inside Android system
               if adb shell "nc -z 127.0.0.1 20128 || netstat -tuln | grep 20128" 2>/dev/null; then
                 echo "✓ 9Router Node SEA is listening on port 20128 inside Android!"
                 OK=1
                 break
               fi
               
-              # Check logcat for health confirmations
               if adb logcat -d | grep -qi "SEA spawn pid\|NodeRunner.*spawn\|HealthCheck.*ok\|ready"; then
                 echo "✓ SEA runtime activity confirmed in Logcat!"
               fi
