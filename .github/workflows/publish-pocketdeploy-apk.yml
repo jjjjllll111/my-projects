@@ -213,8 +213,13 @@ jobs:
           if [ ! -f "$AGG/libc++_shared.so" ] && ls "$TMP/libs/libc++"/data/data/com.termux/files/usr/lib/*.so* >/dev/null 2>&1; then cp -a "$TMP/libs/libc++"/data/data/com.termux/files/usr/lib/*.so* "$AGG"/ 2>/dev/null || true; fi
           for so in $(readelf -d "$DEST" | grep -oP '(?<=Shared library: \[)[^\]]+'); do case "$so" in libc.so|libdl.so|libm.so) continue;; esac; if [ ! -f "$AGG/$so" ]; then echo "::error::NEEDED $so MISSING in AGG"; fi; done
           ls "$AGG" | sort | tr ' ' '\n' | head -50 || true; echo "AGG has libc++: $(ls "$AGG" | grep -i c++ 2>&1 | head -n 10 || echo none)"
+          # Strip system-overlapping libraries that clash with Android's system linker/translation layer:
+          # (Android provides libz.so, libc.so, libm.so, libdl.so natively — having arm64 versions in LD_LIBRARY_PATH breaks translator/system)
+          echo "Removing conflicting system-overlapping libs from node-libs..."
+          rm -f "$AGG"/libz.so* "$AGG"/libc.so* "$AGG"/libm.so* "$AGG"/libdl.so* || true
+          
           mkdir -p android/app/src/main/assets/node-libs; cp -a "$AGG"/* android/app/src/main/assets/node-libs/ 2>/dev/null || true
-          echo "node-libs staged: $(ls android/app/src/main/assets/node-libs | wc -l) files -> $(du -sh android/app/src/main/assets/node-libs | cut -f1)"; ls android/app/src/main/assets/node-libs | grep -i "c++\|plus" | head -n 10 || echo "no c++ in node-libs"
+          echo "node-libs staged: $(ls android/app/src/main/assets/node-libs | wc -l) files -> $(du -sh android/app/src/main/assets/node-libs | cut -f1)"; ls android/app/src/main/assets/node-libs | grep -i "c++\|plus" | head -10 || echo "no c++ in node-libs"
           readelf -d "$DEST" | grep NEEDED || true
           mkdir -p "$RUNNER_TEMP/sea-libs"; cp -a "$AGG"/* "$RUNNER_TEMP/sea-libs"/ 2>/dev/null || true
           echo "SEA host + libs ready: $(ls "$RUNNER_TEMP/sea-libs" | wc -l) libs"
