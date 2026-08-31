@@ -162,6 +162,7 @@ jobs:
 
       # ── Upload + Release ──────────────────────────────────────
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: Paperclip-${{ inputs.build_type || 'release' }}-apk
           path: _paperclip/ui/android/app/build/outputs/apk/**/*.apk
