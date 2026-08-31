@@ -78,6 +78,19 @@ jobs:
           cp -a "$SRC" "$DST"
           mkdir -p "$DST/app/src/main/assets"
           cp -a _paperclip/ui/dist/. "$DST/app/src/main/assets/"
+
+          # Download gradle wrapper (jar was too large for API push)
+          mkdir -p "$DST/gradle/wrapper"
+          WRAPPER_JAR="$DST/gradle/wrapper/gradle-wrapper.jar"
+          curl -fsSL "https://raw.githubusercontent.com/nicoulaj/gradle-wrapper/refs/heads/main/gradle-wrapper.jar" -o "$WRAPPER_JAR" 2>/dev/null || {
+            echo 'Downloading wrapper jar from gradle dist...'
+            curl -fsSL "https://services.gradle.org/distributions/gradle-8.6-bin.zip" -o /tmp/g.zip
+            cd /tmp && unzip -q g.zip && cd -
+            cp /tmp/gradle-8.6/lib/gradle-wrapper-*.jar "$WRAPPER_JAR" 2>/dev/null || true
+          }
+          curl -fsSL "https://raw.githubusercontent.com/nicoulaj/gradle-wrapper/refs/heads/main/gradlew" -o "$DST/gradlew" 2>/dev/null || true
+          chmod +x "$DST/gradlew" 2>/dev/null || true
+          echo "Wrapper jar: $(ls -lh "$WRAPPER_JAR" 2>/dev/null || echo 'missing')"
           echo "Assets: $(du -sh "$DST/app/src/main/assets" | cut -f1) files=$(find "$DST/app/src/main/assets" -type f | wc -l)"
 
       # ── Build APK ─────────────────────────────────────────────
