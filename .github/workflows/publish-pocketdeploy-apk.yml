@@ -411,13 +411,13 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 600
           script: |
-            set -euo pipefail
+            set -e
             APK_PATH="android/${{ env.APK }}"
             echo "=== Installing APK into real Android Emulator ==="
             adb wait-for-device
-            adb shell settings put global window_animation_scale 0
-            adb shell settings put global transition_animation_scale 0
-            adb shell settings put global animator_duration_scale 0
+            adb shell settings put global window_animation_scale 0 || true
+            adb shell settings put global transition_animation_scale 0 || true
+            adb shell settings put global animator_duration_scale 0 || true
             adb install -r "$APK_PATH"
             
             echo "--- Starting MainActivity & foreground RouterService ---"
@@ -427,7 +427,7 @@ jobs:
             OK=0
             for i in $(seq 1 40); do
               sleep 3
-              PID=$(adb shell pidof com.pocketdeploy.app || true)
+              PID=$(adb shell pidof com.pocketdeploy.app 2>/dev/null || echo "none")
               echo "App PID: $PID (tick $i/40)"
               
               if adb shell "nc -z 127.0.0.1 20128 || netstat -tuln | grep 20128" 2>/dev/null; then
@@ -436,17 +436,17 @@ jobs:
                 break
               fi
               
-              if adb logcat -d | grep -qi "SEA spawn pid\|NodeRunner.*spawn\|HealthCheck.*ok\|ready"; then
+              if adb logcat -d 2>/dev/null | grep -qi "SEA spawn pid\|NodeRunner.*spawn\|HealthCheck.*ok\|ready"; then
                 echo "✓ SEA runtime activity confirmed in Logcat!"
               fi
             done
             
             echo "=== Full NodeRunner & App Logcat Output ==="
-            adb logcat -d -s NodeRunner:I RouterService:I HeadroomRunner:I libc:F DEBUG:F AndroidRuntime:E | tail -100 || true
+            adb logcat -d -s NodeRunner:I RouterService:I HeadroomRunner:I libc:F DEBUG:F AndroidRuntime:E 2>/dev/null | tail -100 || true
             
             if [ "$OK" != "1" ]; then
               echo "--- Fallback check: dumping all recent logs ---"
-              adb logcat -d | grep -i "pocketdeploy\|node\|myapp" | tail -60 || true
+              adb logcat -d 2>/dev/null | grep -i "pocketdeploy\|node\|myapp" | tail -60 || true
             fi
 
       - name: Build AAB (Bundletool, release only)
