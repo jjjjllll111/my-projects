@@ -380,7 +380,10 @@ jobs:
             KEYSTORE="$RUNNER_TEMP/ci-release.keystore"
             keytool -genkeypair -v -keystore "$KEYSTORE" -alias pocketdeploy -keyalg RSA -keysize 2048 -validity 10000 -storepass pocketdeploy -keypass pocketdeploy -dname "CN=PocketDeploy, OU=CI, O=PocketDeploy, L=Local, ST=Local, C=CN"
             SIGNED_APK="app/build/outputs/apk/release/app-release-signed.apk"
-            apksigner sign --ks "$KEYSTORE" --ks-pass pass:pocketdeploy --key-pass pass:pocketdeploy --out "$SIGNED_APK" "$APK"
+            APK_SIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+            test -x "$APK_SIGNER" || APK_SIGNER="$ANDROID_HOME/build-tools/34.0.0/apksigner"
+            test -x "$APK_SIGNER" || APK_SIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | head -1)"
+            "$APK_SIGNER" sign --ks "$KEYSTORE" --ks-pass pass:pocketdeploy --key-pass pass:pocketdeploy --out "$SIGNED_APK" "$APK"
             APK="$SIGNED_APK"
           else
             ./gradlew :app:assembleDebug --stacktrace
@@ -399,7 +402,7 @@ jobs:
           # Direct runtime headless test: unpack SEA myapp and test spawn in bionic/proot environment
           TEST_DIR="$RUNNER_TEMP/e2e-test"
           rm -rf "$TEST_DIR"; mkdir -p "$TEST_DIR/work/9router" "$TEST_DIR/lib"
-          unzip -q "$APK_PATH" "assets/myapp" "assets/node-libs/*" "assets/9router/*" "assets/headroom/*" -d "$TEST_DIR" || true
+          unzip -q "$APK_PATH" "assets/myapp" "assets/node-libs/*" "assets/9router/*" "assets/headroom/*" "lib/arm64-v8a/*" -d "$TEST_DIR" || true
           
           # Stage files as Android app filesDir layout
           cp "$TEST_DIR/assets/myapp" "$TEST_DIR/work/myapp"
