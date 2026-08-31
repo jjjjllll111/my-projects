@@ -109,6 +109,34 @@ jobs:
           npm run build
           echo "✓ CLI build completed"
 
+      - name: Verify Upstash/Qdrant memory artifacts bundled
+        run: |
+          set -euo pipefail
+          # Standalone must contain the new memory routes + clients (otherwise dashboard shows offline)
+          for f in \
+            "cli/app/open-sse/services/memory/upstash.js" \
+            "cli/app/open-sse/services/memory/qdrant.js" \
+            "cli/app/open-sse/services/memory/vectorStore.js" \
+            "cli/app/src/app/api/memory/qdrant-health/route.js" \
+            "cli/app/src/app/(dashboard)/dashboard/memory/MemoryClient.js" \
+            "cli/app/.next-cli-build/server/app/api/memory/qdrant-health/route.js" \
+            "cli/app/.next-cli-build/server/app/api/settings/route.js"; do
+            if [ ! -f "$f" ]; then
+              echo "::error::Missing required bundled artifact: $f"
+              echo "--- cli/app tree (top) ---"; ls -R cli/app | head -n 200
+              exit 1
+            fi
+          done
+          echo "✓ memory artifacts present"
+          # Guard against stale .next-cli-build from cache: ensure upstash health string exists in compiled chunk
+          if ! grep -R "UPSTASH_VECTOR_REST_TOKEN" cli/app/.next-cli-build 2>/dev/null | grep -q "UPSTASH"; then
+            echo "::warning::Compiled bundle does not contain UPSTASH_VECTOR_REST_TOKEN — stale build?"
+          fi
+          # Also ensure combo strategy fix is in bundle
+          if ! grep -R "weighted-round-robin" cli/app 2>/dev/null | grep -q "weighted"; then
+            echo "::warning::Bundle missing weighted-round-robin — is combo fix merged?"
+          fi
+
       # ---- guard: npm silently SKIPS optional deps whose fetch/install fails
       # ---- transiently (observed as random 600-vs-635 package installs).
       # ---- Re-fetch explicitly and hard-fail if still absent.
