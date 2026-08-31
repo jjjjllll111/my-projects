@@ -412,13 +412,18 @@ jobs:
           emulator-boot-timeout: 600
           script: |
             set -e
-            APK_PATH="android/${{ env.APK }}"
+            echo "=== Locating signed release APK ==="
+            APK_FILE=$(find android/app/build/outputs/apk -name "*.apk" -not -name "*unsigned*" | head -1)
+            [ -z "$APK_FILE" ] && APK_FILE=$(find android/app/build/outputs/apk -name "*.apk" | head -1)
+            echo "Using APK: $APK_FILE"
+            ls -lh "$APK_FILE"
+            
             echo "=== Installing APK into real Android Emulator ==="
             adb wait-for-device
             adb shell settings put global window_animation_scale 0 || true
             adb shell settings put global transition_animation_scale 0 || true
             adb shell settings put global animator_duration_scale 0 || true
-            adb install -r "$APK_PATH"
+            adb install -r "$APK_FILE"
             
             echo "--- Starting MainActivity & foreground RouterService ---"
             adb shell am start -n com.pocketdeploy.app/.MainActivity
