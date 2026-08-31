@@ -98,25 +98,18 @@ jobs:
         working-directory: _paperclip/ui/android
         run: |
           set -euo pipefail
-          # Use gradle wrapper from skeleton, or system gradle
-          if [ -f gradlew ] && [ -f gradle/wrapper/gradle-wrapper.jar ]; then
-            chmod +x gradlew
-            ./gradlew --version | head -3
-            BUILD_CMD="./gradlew"
-          elif command -v gradle &>/dev/null; then
-            gradle --version | head -3
-            BUILD_CMD="gradle"
-          else
-            echo "No gradle found, installing..."
-            curl -fsSL "https://services.gradle.org/distributions/gradle-8.6-bin.zip" -o /tmp/g.zip
-            cd /tmp && unzip -q g.zip && cd -
-            /tmp/gradle-8.6/bin/gradle --version | head -3
-            BUILD_CMD="/tmp/gradle-8.6/bin/gradle"
+          # Download Gradle directly - no wrapper needed
+          if ! command -v gradle &>/dev/null; then
+            echo "Installing Gradle 8.6..."
+            curl -fsSL -o /tmp/gradle.zip "https://services.gradle.org/distributions/gradle-8.6-bin.zip"
+            cd /tmp && unzip -qo gradle.zip
+            export PATH=/tmp/gradle-8.6/bin:$PATH
           fi
+          gradle --version | head -3
           if [ "${{ inputs.build_type }}" = "debug" ]; then
-            $BUILD_CMD :app:assembleDebug --stacktrace --no-daemon
+            gradle :app:assembleDebug --stacktrace --no-daemon
           else
-            $BUILD_CMD :app:assembleRelease --stacktrace --no-daemon
+            gradle :app:assembleRelease --stacktrace --no-daemon
             KEYSTORE="$RUNNER_TEMP/paperclip.keystore"
             keytool -genkeypair -v -keystore "$KEYSTORE" -alias paperclip -keyalg RSA -keysize 2048 -validity 10000 -storepass paperclip -keypass paperclip -dname "CN=Paperclip,OU=CI,O=Paperclip,L=Local,ST=Local,C=CN"
             UNSIGNED="app/build/outputs/apk/release/app-release-unsigned.apk"
@@ -127,7 +120,6 @@ jobs:
           echo "=== APK ==="
           find app/build/outputs/apk -name "*.apk" -exec ls -lh {} \;
 
-      # ── Verify ────────────────────────────────────────────────
       - name: Verify APK
         run: |
           APK=$(find _paperclip/ui/android/app/build/outputs/apk -name "*.apk" -not -name "*unsigned*" | head -1)
