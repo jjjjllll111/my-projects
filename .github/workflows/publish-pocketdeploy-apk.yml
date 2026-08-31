@@ -202,10 +202,15 @@ jobs:
           echo "AGG libs:"; ls "$AGG" | tr ' ' '\n' | sort | head -40 || true
           # Also copy libc++_shared.so explicitly (NEEDED name differs from package file name libc++_29)
           if ls "$AGG"/libc++* >/dev/null 2>&1; then for f in "$AGG"/libc++*; do echo "libc++ candidate: $(basename "$f") $(file "$f" | cut -d: -f2)"; done; fi
-          if [ ! -f "$AGG/libc++_shared.so" ]; then for f in "$AGG"/*c++*; do if file "$f" 2>&1 | grep -qi "shared object.*aarch64"; then echo "mapping $f -> libc++_shared.so"; cp -a "$f" "$AGG/libc++_shared.so"; break; fi; done; fi
+          # Termux libc++ package libs live under usr/lib/aarch64-linux-android/ not usr/lib — re-collect
+          find "$TMP/libs/libc++_29" -type f -name "*.so*" 2>/dev/null | while read -r f; do echo "libc++ extra collect: $f"; cp -n "$f" "$AGG"/ 2>/dev/null || cp "$f" "$AGG"/; done
+          find "$TMP/libs" -path "*aarch64-linux-android*" -type f -name "*.so*" 2>/dev/null | while read -r f; do cp -n "$f" "$AGG/$(basename "$f")" 2>/dev/null || true; done
+          find "$TMP/libs" -path "*aarch64-linux-android*" -type l -name "*.so*" 2>/dev/null | while read -r l; do t=$(readlink -f "$l" 2>/dev/null || true); [ -f "$t" ] && cp -n "$t" "$AGG/$(basename "$l")" 2>/dev/null || true; done
+          if [ ! -f "$AGG/libc++_shared.so" ]; then for f in "$AGG"/*c++* "$AGG"/libc++*; do [ -f "$f" ] || continue; if file "$f" 2>&1 | grep -qi "shared object"; then echo "mapping $f -> libc++_shared.so"; cp -a "$f" "$AGG/libc++_shared.so"; break; fi; done; fi
           for so in $(readelf -d "$DEST" | grep -oP '(?<=Shared library: \[)[^\]]+'); do case "$so" in libc.so|libdl.so|libm.so) continue;; esac; if [ ! -f "$AGG/$so" ]; then echo "::error::NEEDED $so MISSING in AGG"; fi; done
+          ls "$AGG" | sort | tr ' ' '\n' | head -50 || true; echo "AGG has libc++: $(ls "$AGG" | grep -i c++ 2>&1 | head -n 10 || echo none)"
           mkdir -p android/app/src/main/assets/node-libs; cp -a "$AGG"/* android/app/src/main/assets/node-libs/ 2>/dev/null || true
-          echo "node-libs staged: $(ls android/app/src/main/assets/node-libs | wc -l) files -> $(du -sh android/app/src/main/assets/node-libs | cut -f1)"
+          echo "node-libs staged: $(ls android/app/src/main/assets/node-libs | wc -l) files -> $(du -sh android/app/src/main/assets/node-libs | cut -f1)"; ls android/app/src/main/assets/node-libs | grep -i "c++\|plus" | head -n 10 || echo "no c++ in node-libs"
           readelf -d "$DEST" | grep NEEDED || true
           mkdir -p "$RUNNER_TEMP/sea-libs"; cp -a "$AGG"/* "$RUNNER_TEMP/sea-libs"/ 2>/dev/null || true
           echo "SEA host + libs ready: $(ls "$RUNNER_TEMP/sea-libs" | wc -l) libs"
