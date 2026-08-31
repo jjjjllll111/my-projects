@@ -274,22 +274,25 @@ jobs:
           # here we embed the bootstrap and keep large models external to avoid blob size limits.
           WORK="_9router/cli/app"
           cat > "$RUNNER_TEMP/sea-entry.mjs" <<'SEA_ENTRY'
-          // SEA entry — Node.js Single Executable bootstrap (baked via NDK/Bionic ELF)
-          // Full deps + models are baked: engine deps at ./node_modules, models at ./engine-models
-          // Standalone Next.js entry is at workDir/custom-server.js or server.js (extracted from APK assets)
-          import fs from "node:fs"; import path from "node:path"; import { fileURLToPath } from "node:url";
-          const isSea = typeof process.execPath !== "undefined";
-          // SEA myapp runs with workDir as cwd (RouterService sets directory to filesDir/9router)
+          // SEA entry — Node SEA bootstrap (ESM) — mksnapshot-safe: use createRequire for CJS entry
+          import fs from "node:fs"; import path from "node:path"; import { createRequire } from "node:module";
+          // Standalone Next.js entry is at workDir custom-server.js/server.js (extracted from APK assets)
           const candidates = ["./custom-server.js","./server.js","./9router/custom-server.js","./9router/server.js"];
           let entry=null; for(const c of candidates){ try{ const p=path.resolve(c); if(fs.existsSync(p)){entry=p;break} }catch{} }
-          if(!entry){ console.error("SEA: no entry found", candidates); process.exit(1) }
+          if(!entry){ console.error("SEA: no entry found", candidates.join(",")); process.exit(1) }
           console.log("SEA myapp ->", entry, "execPath=", process.execPath);
-          await import(entry);
+          const require = createRequire(import.meta.url);
+          require(entry);
           SEA_ENTRY
           cat "$RUNNER_TEMP/sea-entry.mjs"
 
-          USE_SNAPSHOT="false"; USE_CODECACHE="false"
-          if [ "${{ inputs.build_type }}" = "release" ]; then USE_SNAPSHOT="true"; USE_CODECACHE="true"; fi
+          # Node 22 SEA: useSnapshot implies codeCache; also ESM snapshot requires mksnapshot-safe CJS wrapper
+          # So keep snapshot=false (max compat), only release enables codeCache via snapshot=false path correctly
+          if [ "${{ inputs.build_type }}" = "release" ]; then
+            USE_SNAPSHOT="false"; USE_CODECACHE="true"
+          else
+            USE_SNAPSHOT="false"; USE_CODECACHE="false"
+          fi
           cat > "$RUNNER_TEMP/sea-config.json" <<SEA_JSON
           {
             "main": "$RUNNER_TEMP/sea-entry.mjs",
@@ -299,7 +302,7 @@ jobs:
             "useCodeCache": $USE_CODECACHE
           }
           SEA_JSON
-          echo "SEA snapshot=$USE_SNAPSHOT codeCache=$USE_CODECACHE (release=>true for faster startup)"
+          echo "SEA snapshot=$USE_SNAPSHOT codeCache=$USE_CODECACHE (release codeCache only, snapshot off for ESM compat)"
           cat "$RUNNER_TEMP/sea-config.json"
 
           # Generate blob via host node (x86 host node generates blob, injected into arm64 host)
