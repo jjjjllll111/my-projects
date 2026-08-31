@@ -66,8 +66,7 @@ jobs:
         with:
           node-version: 22
 
-      - name: Setup pnpm
-        - name: Enable corepack
+      - name: Enable corepack
         run: corepack enable || true
 
       - name: Setup pnpm
