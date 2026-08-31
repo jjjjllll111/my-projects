@@ -9,6 +9,7 @@ import android.content.Intent;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
+import com.paperclip.app.MainActivity;
 import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
