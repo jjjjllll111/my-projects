@@ -85,19 +85,25 @@ jobs:
         working-directory: _paperclip/ui/android
         run: |
           set -euo pipefail
-          GRADLE_BIN=$(which gradle 2>/dev/null || echo "")
-          if [ ! -x "$GRADLE_BIN" ]; then
-            echo "Downloading Gradle 8.6..."
+          # Use gradle wrapper from skeleton, or system gradle
+          if [ -f gradlew ] && [ -f gradle/wrapper/gradle-wrapper.jar ]; then
+            chmod +x gradlew
+            ./gradlew --version | head -3
+            BUILD_CMD="./gradlew"
+          elif command -v gradle &>/dev/null; then
+            gradle --version | head -3
+            BUILD_CMD="gradle"
+          else
+            echo "No gradle found, installing..."
             curl -fsSL "https://services.gradle.org/distributions/gradle-8.6-bin.zip" -o /tmp/g.zip
             cd /tmp && unzip -q g.zip && cd -
-            GRADLE_BIN=/tmp/gradle-8.6/bin/gradle
+            /tmp/gradle-8.6/bin/gradle --version | head -3
+            BUILD_CMD="/tmp/gradle-8.6/bin/gradle"
           fi
-          echo "Gradle: $GRADLE_BIN"
-          "$GRADLE_BIN" --version | head -3
           if [ "${{ inputs.build_type }}" = "debug" ]; then
-            "$GRADLE_BIN" :app:assembleDebug --stacktrace --no-daemon
+            $BUILD_CMD :app:assembleDebug --stacktrace --no-daemon
           else
-            "$GRADLE_BIN" :app:assembleRelease --stacktrace --no-daemon
+            $BUILD_CMD :app:assembleRelease --stacktrace --no-daemon
             KEYSTORE="$RUNNER_TEMP/paperclip.keystore"
             keytool -genkeypair -v -keystore "$KEYSTORE" -alias paperclip -keyalg RSA -keysize 2048 -validity 10000 -storepass paperclip -keypass paperclip -dname "CN=Paperclip,OU=CI,O=Paperclip,L=Local,ST=Local,C=CN"
             UNSIGNED="app/build/outputs/apk/release/app-release-unsigned.apk"
