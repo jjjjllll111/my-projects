@@ -399,7 +399,6 @@ jobs:
           echo "=== Starting Headless E2E verification of SEA runtime ==="
           test -f "$APK_PATH" || { echo "::error::APK missing for test"; exit 1; }
 
-          # Direct runtime headless test: unpack SEA myapp and test spawn in bionic sysroot environment
           TEST_DIR="$RUNNER_TEMP/e2e-test"
           rm -rf "$TEST_DIR"; mkdir -p "$TEST_DIR/work/9router" "$TEST_DIR/lib" "$TEST_DIR/rootfs/system/bin" "$TEST_DIR/rootfs/system/lib64"
           unzip -q "$APK_PATH" "assets/myapp" "assets/node-libs/*" "assets/9router/*" "assets/headroom/*" "lib/arm64-v8a/*" -d "$TEST_DIR" || true
@@ -410,20 +409,19 @@ jobs:
           cp -a "$TEST_DIR/assets/node-libs"/. "$TEST_DIR/lib"/ 2>/dev/null || true
           cp -a "$TEST_DIR/assets/9router"/. "$TEST_DIR/work/9router"/ 2>/dev/null || true
           
-          # Set up Bionic Rootfs for QEMU / PRoot: fetch Android Bionic sysroot (linker64 + system libs)
-          echo "--- Setting up Termux aarch64 minimal rootfs for QEMU Bionic emulation ---"
+          # Set up rootfs with real linker64 + bionic libraries
           ROOTFS="$TEST_DIR/rootfs"
-          curl -fsSL "https://packages.termux.dev/apt/termux-main/pool/main/t/termux-tools/termux-tools_2.1.2_all.deb" -o "$TEST_DIR/tools.deb" || true
-          # Extract libc.so, libm.so, libdl.so, linker64 from Termux libc package
-          curl -fsSL "https://packages.termux.dev/apt/termux-main/pool/main/b/bionic/bionic_29_aarch64.deb" -o "$TEST_DIR/bionic.deb" 2>/dev/null || \
-          curl -fsSL "https://packages.termux.dev/apt/termux-main/pool/main/liba/libandroid-support/libandroid-support_29_aarch64.deb" -o "$TEST_DIR/bionic.deb" 2>/dev/null || true
-          
-          # Ensure linker64 is available for QEMU -L rootfs
-          mkdir -p "$ROOTFS/system/bin" "$ROOTFS/usr/lib" "$ROOTFS/usr/bin"
           cp -a "$TEST_DIR/lib"/* "$ROOTFS/system/lib64"/ 2>/dev/null || true
-          cp -a "$TEST_DIR/lib"/* "$ROOTFS/usr/lib"/ 2>/dev/null || true
           
-          # Install QEMU aarch64 static + proot
+          # Ensure linker64 is provided: NDK sysroot has bionic linker or symlink to libdl/libc loader
+          # If linker64 is missing in container, download genuine Android AOSP bionic linker64
+          if [ ! -f "$ROOTFS/system/bin/linker64" ]; then
+            echo "--- Fetching Android ARM64 system linker64 ---"
+            curl -fsSL "https://raw.githubusercontent.com/termux/termux-packages/master/packages/bionic/linker64" -o "$ROOTFS/system/bin/linker64" 2>/dev/null || \
+            curl -fsSL "https://raw.githubusercontent.com/anbox/android-prebuilt/master/arm64/system/bin/linker64" -o "$ROOTFS/system/bin/linker64" 2>/dev/null || true
+            chmod +x "$ROOTFS/system/bin/linker64" 2>/dev/null || true
+          fi
+          
           sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static proot
           
           echo "--- Verifying SEA ELF Architecture & NEEDED closure ---"
@@ -435,15 +433,16 @@ jobs:
           export DATA_DIR="$TEST_DIR/data"
           mkdir -p "$DATA_DIR"
 
-          # Run headless test inside PRoot container with QEMU arm64
-          echo "--- Launching SEA myapp via PRoot / QEMU aarch64 ---"
-          # Docker/Runner proot execution of the ELF binary
+          echo "--- Launching SEA myapp inside PRoot (rootfs: $ROOTFS) ---"
+          # PRoot mounts the rootfs as /, providing /system/bin/linker64 and /system/lib64 to QEMU
           ( cd "$TEST_DIR/work/9router" && \
-            LD_LIBRARY_PATH="$TEST_DIR/lib:$ROOTFS/system/lib64" \
-            qemu-aarch64-static "$TEST_DIR/work/myapp" ) > "$TEST_DIR/myapp.log" 2>&1 &
+            proot -r "$ROOTFS" -b "$TEST_DIR/work:/app" -b "$TEST_DIR/lib:/lib64" \
+                  -e LD_LIBRARY_PATH="/lib64:/system/lib64" \
+                  -e PORT=20128 -e HOST=0.0.0.0 -e DATA_DIR="/app/data" -e NODE_ENV=production \
+                  -w /app/9router \
+                  qemu-aarch64-static /app/myapp ) > "$TEST_DIR/myapp.log" 2>&1 &
           MYAPP_PID=$!
           
-          # Monitor port 20128 readiness
           echo "--- Polling port 20128 & logging output ---"
           OK=0
           for i in $(seq 1 15); do
@@ -464,7 +463,7 @@ jobs:
           cat "$TEST_DIR/myapp.log" | tail -50 || true
           kill -9 "$MYAPP_PID" 2>/dev/null || true
           
-          # Structural validation assertion: ensure SEA entry and standalone bundles are valid
+          # Structural validation assertion
           test -s "$TEST_DIR/work/myapp" && test -f "$TEST_DIR/work/9router/server.js" && echo "✓ SEA single binary + server.js static structure verified intact!"
 
       - name: Build AAB (Bundletool, release only)
