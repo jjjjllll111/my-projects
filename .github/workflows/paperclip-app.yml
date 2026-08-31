@@ -145,7 +145,7 @@ jobs:
           set -euo pipefail
           # Use npx from the temp install
           export PATH="/tmp/cap-install/node_modules/.bin:$PATH"
-          cap init "Paperclip" com.paperclip.app --web-dir dist --npm-client npm
+          cap init "Paperclip" com.paperclip.app --web-dir dist
           cap add android
 
       - name: Copy Capacitor deps into project
