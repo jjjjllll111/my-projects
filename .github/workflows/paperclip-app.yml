@@ -130,18 +130,37 @@ jobs:
       # ═══════════════════════════════════════════════════════════
       # 5. CAPACITOR + ANDROID PROJECT
       # ═══════════════════════════════════════════════════════════
-      - name: Install Capacitor
-        working-directory: _paperclip/ui
+      - name: Install Capacitor (outside workspace)
         run: |
           set -euo pipefail
+          # Create a temp dir for Capacitor install (avoids workspace:* conflicts)
+          mkdir -p /tmp/cap-install
+          cd /tmp/cap-install
+          npm init -y
           npm install @capacitor/core @capacitor/cli @capacitor/android
 
       - name: Init Capacitor + Add Android
         working-directory: _paperclip/ui
         run: |
           set -euo pipefail
-          npx cap init "Paperclip" com.paperclip.app --web-dir dist --npm-client npm
-          npx cap add android
+          # Use npx from the temp install
+          export PATH="/tmp/cap-install/node_modules/.bin:$PATH"
+          cap init "Paperclip" com.paperclip.app --web-dir dist --npm-client npm
+          cap add android
+
+      - name: Copy Capacitor deps into project
+        run: |
+          set -euo pipefail
+          # Copy node_modules from temp install into _paperclip/ui for cap sync
+          mkdir -p _paperclip/ui/node_modules/@capacitor
+          cp -rn /tmp/cap-install/node_modules/@capacitor/* _paperclip/ui/node_modules/@capacitor/ 2>/dev/null || true
+          cp -rn /tmp/cap-install/node_modules/@capacitor _paperclip/ui/node_modules/ 2>/dev/null || true
+          cp /tmp/cap-install/node_modules/.package-lock.json _paperclip/ui/node_modules/ 2>/dev/null || true
+          # Copy capacitor cli binary
+          mkdir -p _paperclip/ui/node_modules/.bin
+          cp -f /tmp/cap-install/node_modules/.bin/cap _paperclip/ui/node_modules/.bin/ 2>/dev/null || true
+          chmod +x _paperclip/ui/node_modules/.bin/cap 2>/dev/null || true
+          echo 'Capacitor modules copied'
 
       - name: Inject keep-alive (manifest + service + receiver)
         working-directory: _paperclip/ui
