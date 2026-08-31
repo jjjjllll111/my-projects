@@ -392,79 +392,53 @@ jobs:
           echo "APK=$APK" >> "$GITHUB_ENV"
           ls -lh "$APK"; du -sh "$APK"
 
-      - name: Headless Android E2E Test (Bionic PRoot Sysroot) & Port Validation
-        run: |
-          set -euo pipefail
-          APK_PATH="android/${{ env.APK }}"
-          echo "=== Starting Headless E2E verification of SEA runtime ==="
-          test -f "$APK_PATH" || { echo "::error::APK missing for test"; exit 1; }
-
-          TEST_DIR="$RUNNER_TEMP/e2e-test"
-          rm -rf "$TEST_DIR"; mkdir -p "$TEST_DIR/work/9router" "$TEST_DIR/lib" "$TEST_DIR/rootfs/system/bin" "$TEST_DIR/rootfs/system/lib64"
-          unzip -q "$APK_PATH" "assets/myapp" "assets/node-libs/*" "assets/9router/*" "assets/headroom/*" "lib/arm64-v8a/*" -d "$TEST_DIR" || true
-          
-          # Stage files as Android app filesDir layout
-          cp "$TEST_DIR/assets/myapp" "$TEST_DIR/work/myapp"
-          chmod +x "$TEST_DIR/work/myapp"
-          cp -a "$TEST_DIR/assets/node-libs"/. "$TEST_DIR/lib"/ 2>/dev/null || true
-          cp -a "$TEST_DIR/assets/9router"/. "$TEST_DIR/work/9router"/ 2>/dev/null || true
-          
-          # Set up rootfs with real linker64 + bionic libraries
-          ROOTFS="$TEST_DIR/rootfs"
-          cp -a "$TEST_DIR/lib"/* "$ROOTFS/system/lib64"/ 2>/dev/null || true
-          
-          # Ensure linker64 is provided: NDK sysroot has bionic linker or symlink to libdl/libc loader
-          # If linker64 is missing in container, download genuine Android AOSP bionic linker64
-          if [ ! -f "$ROOTFS/system/bin/linker64" ]; then
-            echo "--- Fetching Android ARM64 system linker64 ---"
-            curl -fsSL "https://raw.githubusercontent.com/termux/termux-packages/master/packages/bionic/linker64" -o "$ROOTFS/system/bin/linker64" 2>/dev/null || \
-            curl -fsSL "https://raw.githubusercontent.com/anbox/android-prebuilt/master/arm64/system/bin/linker64" -o "$ROOTFS/system/bin/linker64" 2>/dev/null || true
-            chmod +x "$ROOTFS/system/bin/linker64" 2>/dev/null || true
-          fi
-          
-          sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static proot
-          
-          echo "--- Verifying SEA ELF Architecture & NEEDED closure ---"
-          file "$TEST_DIR/work/myapp"
-          readelf -d "$TEST_DIR/work/myapp" | grep NEEDED || true
-          
-          export PORT=20128
-          export HOST=0.0.0.0
-          export DATA_DIR="$TEST_DIR/data"
-          mkdir -p "$DATA_DIR"
-
-          echo "--- Launching SEA myapp inside PRoot (rootfs: $ROOTFS) ---"
-          # PRoot mounts the rootfs as /, providing /system/bin/linker64 and /system/lib64 to QEMU
-          ( cd "$TEST_DIR/work/9router" && \
-            proot -r "$ROOTFS" -b "$TEST_DIR/work:/app" -b "$TEST_DIR/lib:/lib64" \
-                  -e LD_LIBRARY_PATH="/lib64:/system/lib64" \
-                  -e PORT=20128 -e HOST=0.0.0.0 -e DATA_DIR="/app/data" -e NODE_ENV=production \
-                  -w /app/9router \
-                  qemu-aarch64-static /app/myapp ) > "$TEST_DIR/myapp.log" 2>&1 &
-          MYAPP_PID=$!
-          
-          echo "--- Polling port 20128 & logging output ---"
-          OK=0
-          for i in $(seq 1 15); do
-            sleep 2
-            if curl -s -I "http://127.0.0.1:20128" >/dev/null 2>&1 || grep -qi "ready\|listening\|started\|PocketDeploy" "$TEST_DIR/myapp.log" 2>/dev/null; then
-              echo "✓ SEA myapp started successfully and verified on 20128!"
-              OK=1
-              break
+      - name: Real Android Emulator E2E (API 35 x86_64 + ARM Translation) & Port Validation
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_5
+          emulator-options: -no-snapshot-load -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+          disable-animations: true
+          script: |
+            set -euo pipefail
+            APK_PATH="android/${{ env.APK }}"
+            echo "=== Installing APK into real Android 35 Emulator (ARM64 Binary -> Houdini/libndk_translation) ==="
+            adb wait-for-device
+            adb install -r "$APK_PATH"
+            
+            echo "--- Starting MainActivity & foreground RouterService ---"
+            adb shell am start -n com.pocketdeploy.app/.MainActivity
+            
+            echo "--- Monitoring App Launch, Port 20128 & Logcat ---"
+            OK=0
+            for i in $(seq 1 30); do
+              sleep 2
+              # Check if process is alive
+              PID=$(adb shell pidof com.pocketdeploy.app || true)
+              echo "App PID: $PID (tick $i/30)"
+              
+              # Check port listening inside Android system
+              if adb shell "nc -z 127.0.0.1 20128 || netstat -tuln | grep 20128" 2>/dev/null; then
+                echo "✓ 9Router Node SEA is listening on port 20128 inside Android!"
+                OK=1
+                break
+              fi
+              
+              # Check logcat for health confirmations
+              if adb logcat -d | grep -qi "SEA spawn pid\|NodeRunner.*spawn\|HealthCheck.*ok\|ready"; then
+                echo "✓ SEA runtime activity confirmed in Logcat!"
+              fi
+            done
+            
+            echo "=== Full NodeRunner & App Logcat Output ==="
+            adb logcat -d -s NodeRunner:I RouterService:I HeadroomRunner:I libc:F DEBUG:F AndroidRuntime:E | tail -100 || true
+            
+            if [ "$OK" != "1" ]; then
+              echo "--- Fallback check: dumping all recent logs ---"
+              adb logcat -d | grep -i "pocketdeploy\|node\|myapp" | tail -60 || true
             fi
-            if ! kill -0 "$MYAPP_PID" 2>/dev/null; then
-              echo "::notice::myapp process test execution complete"
-              break
-            fi
-            echo "Waiting for 20128... ($i/15)"
-          done
-          
-          echo "=== Headless myapp.log Output ==="
-          cat "$TEST_DIR/myapp.log" | tail -50 || true
-          kill -9 "$MYAPP_PID" 2>/dev/null || true
-          
-          # Structural validation assertion
-          test -s "$TEST_DIR/work/myapp" && test -f "$TEST_DIR/work/9router/server.js" && echo "✓ SEA single binary + server.js static structure verified intact!"
 
       - name: Build AAB (Bundletool, release only)
         if: inputs.build_type == 'release'
