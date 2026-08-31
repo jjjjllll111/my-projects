@@ -226,9 +226,10 @@ jobs:
           test -x "$STRIP" || STRIP="llvm-strip"
           echo "llvm-strip myapp + node-libs (Bionic, DT_NEEDED keep)"
           "$STRIP" --strip-all --strip-unneeded --remove-section=.comment "$RUNNER_TEMP/sea-host/node-bionic" 2>&1 | head -20 || true
-          "$STRIP" --strip-all --strip-unneeded --remove-section=.comment android/app/src/main/assets/node-bionic 2>&1 | head -20 || true || true
-          for f in android/app/src/main/assets/node-libs/*.so* "$RUNNER_TEMP/sea-libs"/*.so* 2>/dev/null; do [ -f "$f" ] || continue; "$STRIP" --strip-all --strip-unneeded --remove-section=.comment "$f" 2>&1 | head -5 || true; done
-          if command -v patchelf >/dev/null 2>&1; then for f in android/app/src/main/assets/node-libs/*.so 2>/dev/null; do patchelf --remove-needed libandroid-shmem.so "$f" 2>&1 | head -5 || true; patchelf --remove-needed libandroid-spawn.so "$f" 2>&1 | head -5 || true; done; fi
+          "$STRIP" --strip-all --strip-unneeded --remove-section=.comment android/app/src/main/assets/node-bionic 2>&1 | head -20 || true
+          for f in android/app/src/main/assets/node-libs/*.so*; do [ -f "$f" ] || continue; "$STRIP" --strip-all --strip-unneeded --remove-section=.comment "$f" 2>&1 | head -5 || true; done
+          for f in "$RUNNER_TEMP/sea-libs"/*.so*; do [ -f "$f" ] || continue; "$STRIP" --strip-all --strip-unneeded --remove-section=.comment "$f" 2>&1 | head -5 || true; done
+          if command -v patchelf >/dev/null 2>&1; then for f in android/app/src/main/assets/node-libs/*.so; do [ -f "$f" ] || continue; patchelf --remove-needed libandroid-shmem.so "$f" 2>&1 | head -5 || true; patchelf --remove-needed libandroid-spawn.so "$f" 2>&1 | head -5 || true; done; fi
           readelf -d "$RUNNER_TEMP/sea-host/node-bionic" | grep NEEDED || true
           ls -lh "$RUNNER_TEMP/sea-host/node-bionic" | head -5 || true
           du -sh android/app/src/main/assets/node-libs 2>&1 | head -5 || true
