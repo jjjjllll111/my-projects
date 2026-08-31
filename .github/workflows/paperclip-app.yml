@@ -1,7 +1,6 @@
-# Build Paperclip Android APK (native ELF SEA)
-# Each run fetches the latest paperclip-master, builds UI + server, creates SEA binary, compiles APK.
-# Adapted from publish-pocketdeploy-apk.yml — same NDK/Bionic SEA pipeline.
-name: Build Paperclip APK (native ELF SEA)
+# Build Paperclip Android APK (WebView + KeepAlive)
+# Each run fetches the latest paperclip-master, builds UI, generates Android project inline, compiles APK.
+name: Build Paperclip APK
 
 on:
   workflow_dispatch:
@@ -14,10 +13,6 @@ on:
         description: "debug or release"
         required: false
         default: release
-      build_node_from_source:
-        description: "Build Node.js from source via NDK (slow, else Termux prebuilt)"
-        required: false
-        default: "false"
   push:
     branches: [main]
     paths:
@@ -38,7 +33,6 @@ jobs:
       NODE_OPTIONS: --max-old-space-size=8192
       NPM_CONFIG_AUDIT: "false"
       NPM_CONFIG_FUND: "false"
-      NPM_CONFIG_LOGLEVEL: error
 
     steps:
       # ═══════════════════════════════════════════════════════════
@@ -80,175 +74,417 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-          
+
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install NDK + platforms
-        run: |
-          set -euo pipefail
-          sdkmanager --install "ndk;27.2.12479018" "platforms;android-35" "build-tools;35.0.0" "platform-tools"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - name: Install Android platforms
+        run: sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "platform-tools"
 
       # ═══════════════════════════════════════════════════════════
       # 3. BUILD PAPERCLIP UI
       # ═══════════════════════════════════════════════════════════
       - name: Install paperclip dependencies
         working-directory: _paperclip
-        run: |
-          set -euo pipefail
-          pnpm install --no-frozen-lockfile
+        run: pnpm install --no-frozen-lockfile
 
       - name: Build paperclip UI (Vite)
         working-directory: _paperclip/ui
         run: |
-          set -euo pipefail
           pnpm build
-          echo "UI dist:"
-          du -sh dist/ || true
-          ls dist/ | head -20 || true
+          echo "UI dist size:"
+          du -sh dist/
+          ls dist/ | head -20
 
-      # ═══════════════════════════════════════════════════════════
-      # 4. OPTIMIZE BUNDLE (prune, strip, size audit)
-      # ═══════════════════════════════════════════════════════════
       - name: Optimize UI bundle
         working-directory: _paperclip/ui
         run: |
-          set -euo pipefail
-          echo "=== Pre-optimization ==="
-          du -sh dist/
-          # Remove sourcemaps, license files, hidden files from dist
           find dist/ -name "*.map" -delete 2>/dev/null || true
-          find dist/ -name "*.txt" ! -name "index.html" -delete 2>/dev/null || true
-          find dist/ -name "LICENSE*" -delete 2>/dev/null || true
-          find dist/ -name ".DS_Store" -delete 2>/dev/null || true
           find dist/ -name "*.LICENSE" -delete 2>/dev/null || true
-          echo "=== Post-optimization ==="
+          find dist/ -name "LICENSE*" -delete 2>/dev/null || true
+          echo "Optimized UI size:"
           du -sh dist/
           echo "File count: $(find dist/ -type f | wc -l)"
 
       # ═══════════════════════════════════════════════════════════
-      # 5. CAPACITOR + ANDROID PROJECT
+      # 4. GENERATE ANDROID PROJECT (inline, no Capacitor CLI)
       # ═══════════════════════════════════════════════════════════
-      - name: Install Capacitor (isolated)
+      - name: Generate Android project
         run: |
           set -euo pipefail
-          mkdir -p /tmp/cap
-          cd /tmp/cap
-          npm init -y >/dev/null
-          npm install @capacitor/core @capacitor/cli @capacitor/android
+          A=_paperclip/ui/android
+          rm -rf "$A"
+          mkdir -p "$A/app/src/main/java/com/paperclip/app"
+          mkdir -p "$A/app/src/main/assets"
+          mkdir -p "$A/app/src/main/res/values"
+          mkdir -p "$A/gradle/wrapper"
 
-      - name: Generate Capacitor config + Android project (manual)
-        working-directory: _paperclip/ui
-        run: |
-          set -euo pipefail
+          # Copy UI dist into Android assets (served by WebView)
+          cp -a _paperclip/ui/dist/. "$A/app/src/main/assets/"
 
-          # Write capacitor.config.json
-          cat > capacitor.config.json <<'CAPCFG'
-          {
-            "appId": "com.paperclip.app",
-            "appName": "Paperclip",
-            "webDir": "dist",
-            "server": {
-              "androidScheme": "https",
-              "cleartext": true,
-              "allowNavigation": ["*"]
-            },
-            "android": {
-              "allowMixedContent": true,
-              "captureInput": true
+          # --- Root build.gradle ---
+          cat > "$A/build.gradle" << 'GRADLE_ROOT'
+          buildscript {
+            repositories {
+              google()
+              mavenCentral()
+            }
+            dependencies {
+              classpath 'com.android.tools.build:gradle:8.4.0'
             }
           }
-          CAPCFG
-          echo 'capacitor.config.json written'
+          allprojects {
+            repositories {
+              google()
+              mavenCentral()
+            }
+          }
+          GRADLE_ROOT
 
-          # Generate Android project via cap CLI using node directly
-          cd /tmp/cap
-          node node_modules/@capacitor/cli/bin/cap init "Paperclip" com.paperclip.app --web-dir $(realpath /_paperclip/ui/dist)
-          cd /_paperclip/ui
-          /tmp/cap/node_modules/.bin/cap add android || node /tmp/cap/node_modules/@capacitor/cli/bin/cap add android
+          # --- settings.gradle ---
+          cat > "$A/settings.gradle" << 'SETTINGS'
+          include ':app'
+          project(':app').projectDir = new File('./app')
+          SETTINGS
 
-          echo '=== android dir ==='
-          ls android/ 2>/dev/null || echo 'NO android dir generated'
+          # --- gradle.properties ---
+          cat > "$A/gradle.properties" << 'GPROPS'
+          org.gradle.jvmargs=-Xmx4096m
+          android.useAndroidX=true
+          GPROPS
 
-      - name: Inject keep-alive (manifest + service + receiver)
-        working-directory: _paperclip/ui
+          # --- gradle-wrapper.properties ---
+          cat > "$A/gradle/wrapper/gradle-wrapper.properties" << 'GWRAPPER'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.6-bin.zip
+          networkTimeout=10000
+          validateDistributionUrl=true
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          GWRAPPER
+
+          # --- gradlew script ---
+          cat > "$A/gradlew" << 'GRADLEW'
+          #!/bin/sh
+          # Gradle wrapper stub - downloads gradle if needed
+          APP_NAME="Gradle"
+          APP_BASE_NAME=$(basename "$0")
+          DEFAULT_JVM_OPTS='"-Xmx64m" "-Xms64m"'
+          MAX_FD="maximum"
+          warn () { echo "$*"; }
+          die () { echo "$*"; exit 1; }
+          OS_NAME=$(uname -s)
+          CLASSPATH=$APP_HOME/gradle/wrapper/gradle-wrapper.jar
+          exec java $DEFAULT_JVM_OPTS $JAVA_OPTS $GRADLE_OPTS \
+            "-Dorg.gradle.appname=$APP_BASE_NAME" \
+            -classpath "$CLASSPATH" \
+            org.gradle.wrapper.GradleWrapperMain "$@"
+          GRADLEW
+          chmod +x "$A/gradlew"
+
+          # --- app/build.gradle ---
+          cat > "$A/app/build.gradle" << 'APP_GRADLE'
+          plugins {
+            id 'com.android.application'
+          }
+          android {
+            namespace 'com.paperclip.app'
+            compileSdk 35
+            defaultConfig {
+              applicationId "com.paperclip.app"
+              minSdk 24
+              targetSdk 35
+              versionCode 1
+              versionName "1.0.0"
+            }
+            buildTypes {
+              release {
+                minifyEnabled false
+                proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
+              }
+            }
+            compileOptions {
+              sourceCompatibility JavaVersion.VERSION_17
+              targetCompatibility JavaVersion.VERSION_17
+            }
+          }
+          dependencies {
+            implementation 'androidx.appcompat:appcompat:1.6.1'
+            implementation 'com.google.android.material:material:1.11.0'
+          }
+          APP_GRADLE
+
+          # --- proguard-rules.pro ---
+          touch "$A/app/proguard-rules.pro"
+
+          echo "=== Generated files ==="
+          find "$A" -type f | sort | head -30
+          echo "Total files: $(find "$A" -type f | wc -l)"
+
+      - name: Generate AndroidManifest.xml
         run: |
           set -euo pipefail
-          MANIFEST="android/app/src/main/AndroidManifest.xml"
-          JAVA_DIR="android/app/src/main/java/com/paperclip/app"
+          M=_paperclip/ui/android/app/src/main/AndroidManifest.xml
+          cat > "$M" << 'MANIFEST'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-          # --- Patch AndroidManifest: add permissions ---
-          sed -i 's|</manifest>|\
-            <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\
-            <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />\
-            <uses-permission android:name="android.permission.WAKE_LOCK" />\
-            <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />\
-            <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />\
-            <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\
-            <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />\
-            <uses-permission android:name="android.permission.USE_EXACT_ALARM" />\
-            </manifest>|' "$MANIFEST"
+            <uses-permission android:name="android.permission.INTERNET" />
+            <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+            <uses-permission android:name="android.permission.WAKE_LOCK" />
+            <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+            <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+            <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+            <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+            <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
 
-          # --- Patch AndroidManifest: add service + receiver inside <application> ---
-          sed -i 's|</application>|\
-                <service android:name=".KeepAliveService" android:foregroundServiceType="dataSync" android:exported="false" />\
-                <receiver android:name=".BootReceiver" android:enabled="true" android:exported="true">\
-                    <intent-filter>\
-                        <action android:name="android.intent.action.BOOT_COMPLETED" />\
-                        <action android:name="android.intent.action.QUICKBOOT_POWERON" />\
-                    </intent-filter>\
-                </receiver>\
-            </application>|' "$MANIFEST"
+            <application
+              android:allowBackup="true"
+              android:label="@string/app_name"
+              android:supportsRtl="true"
+              android:theme="@style/AppTheme"
+              android:usesCleartextTraffic="true"
+              android:largeHeap="true">
 
-          # --- Copy Java files ---
-          mkdir -p "$JAVA_DIR"
-          cp "$GITHUB_WORKSPACE/android-skeleton/app/src/main/java/com/paperclip/app/KeepAliveService.java" "$JAVA_DIR/"
-          cp "$GITHUB_WORKSPACE/android-skeleton/app/src/main/java/com/paperclip/app/BootReceiver.java" "$JAVA_DIR/"
+              <activity
+                android:name=".MainActivity"
+                android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
+                android:launchMode="singleTask"
+                android:exported="true"
+                android:windowSoftInputMode="adjustResize">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN" />
+                  <category android:name="android.intent.category.LAUNCHER" />
+                </intent-filter>
+              </activity>
 
-          # --- Patch build.gradle: minSdk 24 for dataSync ---
-          sed -i 's|minSdk [0-9]*|minSdk 24|g' "android/app/build.gradle" 2>/dev/null || true
+              <service android:name=".KeepAliveService"
+                android:foregroundServiceType="dataSync"
+                android:exported="false" />
 
-          echo "=== Patched manifest ==="
-          grep -A2 "KeepAlive\|BootReceiver\|FOREGROUND_SERVICE\|WAKE_LOCK" "$MANIFEST" | head -30
+              <receiver android:name=".BootReceiver"
+                android:enabled="true"
+                android:exported="true">
+                <intent-filter>
+                  <action android:name="android.intent.action.BOOT_COMPLETED" />
+                  <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                </intent-filter>
+              </receiver>
 
-      - name: Capacitor sync
-        working-directory: _paperclip/ui
+            </application>
+          </manifest>
+          MANIFEST
+
+          # --- strings.xml ---
+          cat > _paperclip/ui/android/app/src/main/res/values/strings.xml << 'STRINGS'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+            <string name="app_name">Paperclip</string>
+          </resources>
+          STRINGS
+
+          # --- styles.xml ---
+          cat > _paperclip/ui/android/app/src/main/res/values/styles.xml << 'STYLES'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+            <style name="AppTheme" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+              <item name="android:windowBackground">#FF111827</item>
+            </style>
+          </resources>
+          STYLES
+
+          echo "Manifest + resources written"
+
+      - name: Generate Java sources
         run: |
           set -euo pipefail
-          npx cap sync android
+          J=_paperclip/ui/android/app/src/main/java/com/paperclip/app
+
+          cat > "$J/MainActivity.java" << 'JAVA_MAIN'
+          package com.paperclip.app;
+
+          import android.content.Intent;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.PowerManager;
+          import android.provider.Settings;
+          import android.util.Log;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.view.Window;
+          import android.view.WindowManager;
+          import androidx.appcompat.app.AppCompatActivity;
+
+          public class MainActivity extends AppCompatActivity {
+              private WebView webView;
+              private static final String TAG = "PaperclipMain";
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  requestWindowFeature(Window.FEATURE_NO_TITLE);
+                  getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
+
+                  webView = new WebView(this);
+                  setContentView(webView);
+
+                  WebSettings ws = webView.getSettings();
+                  ws.setJavaScriptEnabled(true);
+                  ws.setDomStorageEnabled(true);
+                  ws.setAllowFileAccess(true);
+                  ws.setMediaPlaybackRequiresUserGesture(false);
+                  ws.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+                  ws.setCacheMode(WebSettings.LOAD_DEFAULT);
+
+                  webView.setWebViewClient(new WebViewClient());
+                  webView.setWebChromeClient(new WebChromeClient());
+                  webView.loadUrl("file:///android_asset/index.html");
+
+                  requestBatteryOptimization();
+                  startKeepAliveService();
+                  Log.i(TAG, "Paperclip started");
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (webView.canGoBack()) webView.goBack();
+                  else super.onBackPressed();
+              }
+
+              private void requestBatteryOptimization() {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                      PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+                      if (pm != null && !pm.isIgnoringBatteryOptimizations(getPackageName())) {
+                          Intent i = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                          i.setData(Uri.parse("package:" + getPackageName()));
+                          try { startActivityForResult(i, 1001); } catch (Exception e) { Log.w(TAG, "Battery opt failed", e); }
+                      }
+                  }
+              }
+
+              private void startKeepAliveService() {
+                  Intent svc = new Intent(this, KeepAliveService.class);
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(svc);
+                  else startService(svc);
+              }
+          }
+          JAVA_MAIN
+
+          cat > "$J/KeepAliveService.java" << 'JAVA_KA'
+          package com.paperclip.app;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Intent;
+          import android.os.Build;
+          import android.os.IBinder;
+          import android.os.PowerManager;
+          import android.util.Log;
+          import androidx.core.app.NotificationCompat;
+
+          public class KeepAliveService extends Service {
+              private static final String TAG = "PaperclipKA";
+              private static final String CHANNEL_ID = "paperclip_bg";
+              private static final int NOTIF_ID = 9999;
+              private PowerManager.WakeLock wakeLock;
+
+              @Override
+              public void onCreate() {
+                  super.onCreate();
+                  createNotificationChannel();
+                  acquireWakeLock();
+              }
+
+              @Override
+              public int onStartCommand(Intent intent, int flags, int startId) {
+                  Log.i(TAG, "KeepAlive started");
+                  startForeground(NOTIF_ID, buildNotification());
+                  return START_STICKY;
+              }
+
+              @Override
+              public IBinder onBind(Intent intent) { return null; }
+
+              @Override
+              public void onDestroy() {
+                  super.onDestroy();
+                  releaseWakeLock();
+              }
+
+              private void createNotificationChannel() {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      NotificationChannel ch = new NotificationChannel(CHANNEL_ID, "Paperclip Background", NotificationManager.IMPORTANCE_LOW);
+                      ch.setShowBadge(false);
+                      ch.enableVibration(false);
+                      NotificationManager m = getSystemService(NotificationManager.class);
+                      if (m != null) m.createNotificationChannel(ch);
+                  }
+              }
+
+              private Notification buildNotification() {
+                  Intent open = new Intent(this, MainActivity.class);
+                  open.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                  PendingIntent pi = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                  return new NotificationCompat.Builder(this, CHANNEL_ID)
+                      .setContentTitle("Paperclip").setContentText("Running in background")
+                      .setSmallIcon(android.R.drawable.ic_menu_send).setContentIntent(pi)
+                      .setOngoing(true).setPriority(NotificationCompat.PRIORITY_LOW)
+                      .setCategory(NotificationCompat.CATEGORY_SERVICE).setSilent(true).build();
+              }
+
+              private void acquireWakeLock() {
+                  PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+                  if (pm != null) {
+                      wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "paperclip:ka");
+                      wakeLock.acquire();
+                  }
+              }
+
+              private void releaseWakeLock() {
+                  if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+              }
+          }
+          JAVA_KA
+
+          cat > "$J/BootReceiver.java" << 'JAVA_BOOT'
+          package com.paperclip.app;
+
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.os.Build;
+          import android.util.Log;
+
+          public class BootReceiver extends BroadcastReceiver {
+              @Override
+              public void onReceive(Context context, Intent intent) {
+                  String action = intent.getAction();
+                  if (Intent.ACTION_BOOT_COMPLETED.equals(action) ||
+                      "android.intent.action.QUICKBOOT_POWERON".equals(action)) {
+                      Log.i("PaperclipBoot", "Boot completed, restarting KeepAlive");
+                      Intent svc = new Intent(context, KeepAliveService.class);
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(svc);
+                      else context.startService(svc);
+                  }
+              }
+          }
+          JAVA_BOOT
+
+          echo "Java sources generated:"
+          find "$J" -name "*.java" -type f
 
       # ═══════════════════════════════════════════════════════════
-      # 6. STRIP NATIVE LIBS (size optimization)
+      # 5. BUILD APK (Gradle)
       # ═══════════════════════════════════════════════════════════
-      - name: Strip native libs (llvm-strip)
-        run: |
-          set -euo pipefail
-          STRIP="$ANDROID_HOME/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
-          if [ -x "$STRIP" ]; then
-            echo "Stripping native .so files..."
-            find _paperclip/ui/android -name "*.so" -type f | while read f; do
-              "$STRIP" --strip-all --strip-unneeded --remove-section=.comment "$f" 2>/dev/null || true
-            done
-            echo "Stripped:"
-            find _paperclip/ui/android -name "*.so" -type f -exec ls -lh {} \; | head -20
-          else
-            echo "::warning::llvm-strip not found, skipping native strip"
-          fi
-
-      # ═══════════════════════════════════════════════════════════
-      # 7. BUILD APK
-      # ═══════════════════════════════════════════════════════════
-      - name: Pre-flight verify
-        run: |
-          set -euo pipefail
-          echo "=== UI dist ==="
-          du -sh _paperclip/ui/dist/
-          echo "=== Android project ==="
-          ls _paperclip/ui/android/app/src/main/assets/ 2>/dev/null || echo "(no assets dir yet)"
-          echo "=== Java files ==="
-          find _paperclip/ui/android -name "*.java" -type f | head -10
-
       - name: Build APK (Gradle)
         working-directory: _paperclip/ui/android
         run: |
@@ -256,84 +492,55 @@ jobs:
           chmod +x gradlew
           if [ "${{ inputs.build_type }}" = "debug" ]; then
             ./gradlew :app:assembleDebug --stacktrace --no-daemon
-            APK="app/build/outputs/apk/debug/app-debug.apk"
           else
             ./gradlew :app:assembleRelease --stacktrace --no-daemon
-            APK="app/build/outputs/apk/release/app-release-unsigned.apk"
-            # Auto-sign release with CI debug keystore
+            # Sign release with CI keystore
             KEYSTORE="$RUNNER_TEMP/paperclip.keystore"
             keytool -genkeypair -v -keystore "$KEYSTORE" -alias paperclip \
               -keyalg RSA -keysize 2048 -validity 10000 \
               -storepass paperclip -keypass paperclip \
               -dname "CN=Paperclip, OU=CI, O=Paperclip, L=Local, ST=Local, C=CN"
+            UNSIGNED="app/build/outputs/apk/release/app-release-unsigned.apk"
             SIGNED="app/build/outputs/apk/release/app-release-signed.apk"
             APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
             "$APKSIGNER" sign --ks "$KEYSTORE" --ks-pass pass:paperclip \
-              --key-pass pass:paperclip --out "$SIGNED" "$APK"
-            APK="$SIGNED"
+              --key-pass pass:paperclip --out "$SIGNED" "$UNSIGNED"
+            cp "$SIGNED" "app/build/outputs/apk/release/app-release.apk"
           fi
-          echo "APK=$APK" >> "$GITHUB_ENV"
           echo "=== APK built ==="
+          find app/build/outputs/apk -name "*.apk" -exec ls -lh {} \;
+          du -sh app/build/outputs/apk/
+
+      # ═══════════════════════════════════════════════════════════
+      # 6. VERIFY APK
+      # ═══════════════════════════════════════════════════════════
+      - name: Verify APK
+        run: |
+          set -euo pipefail
+          APK=$(find _paperclip/ui/android/app/build/outputs/apk -name "*.apk" -not -name "*unsigned*" | head -1)
+          [ -z "$APK" ] && APK=$(find _paperclip/ui/android/app/build/outputs/apk -name "*.apk" | head -1)
+          echo "APK: $APK"
           ls -lh "$APK"
-          du -sh "$APK"
-
-      # ═══════════════════════════════════════════════════════════
-      # 8. BUILD AAB (release only, Bundletool)
-      # ═══════════════════════════════════════════════════════════
-      - name: Build AAB (Bundletool, release only)
-        if: inputs.build_type == 'release'
-        working-directory: _paperclip/ui/android
-        run: |
-          set -euo pipefail
-          ./gradlew :app:bundleRelease --stacktrace --no-daemon
-          AAB="app/build/outputs/bundle/release/app-release.aab"
-          echo "AAB=$AAB" >> "$GITHUB_ENV"
-          ls -lh "$AAB"; du -sh "$AAB"
-
-      # ═══════════════════════════════════════════════════════════
-      # 9. GENERATE BASELINE PROFILE (dex2oat speed-profile)
-      # ═══════════════════════════════════════════════════════════
-      - name: Generate Baseline Profile
-        if: inputs.build_type == 'release'
-        run: |
-          set -euo pipefail
-          cat > _paperclip/ui/android/app/src/main/baseline-prof.txt <<'PROF'
-          HLcom/paperclip/app/MainActivity;  # hot startup
-          HLcom/paperclip/app/KeepAliveService;  # keepalive
-          HLcom/paperclip/app/BootReceiver;  # boot restart
-          PROF
-          cat _paperclip/ui/android/app/src/main/baseline-prof.txt
-          echo "baseline-prof ready for dex2oat --compiler-filter=speed-profile"
-
-      # ═══════════════════════════════════════════════════════════
-      # 10. VERIFY APK
-      # ═══════════════════════════════════════════════════════════
-      - name: Verify APK contents
-        run: |
-          set -euo pipefail
-          APK="_paperclip/ui/${{ env.APK }}"
           echo "=== APK contents ==="
-          unzip -l "$APK" | grep -E "classes|assets/|lib/" | head -40 || true
-          echo "=== DEX check ==="
-          unzip -l "$APK" | grep -c "classes.*\.dex" || true
-          echo "=== UI assets check ==="
-          unzip -l "$APK" | grep "assets/" | head -20 || true
+          unzip -l "$APK" | grep -E "assets/|classes|lib/" | head -30
+          echo "=== DEX files ==="
+          unzip -l "$APK" | grep "classes.*\.dex" | wc -l
+          echo "=== Assets check ==="
+          unzip -l "$APK" | grep "assets/index.html" | head -5
           echo "=== Size ==="
           du -sh "$APK"
-          ls -lh "$APK"
 
       # ═══════════════════════════════════════════════════════════
-      # 11. E2E: REAL ANDROID EMULATOR TEST
+      # 7. E2E: ANDROID EMULATOR TEST
       # ═══════════════════════════════════════════════════════════
-      - name: Enable KVM hardware acceleration
+      - name: Enable KVM
         run: |
-          echo "=== Setting up KVM ==="
           sudo groupadd -r kvm 2>/dev/null || true
           sudo gpasswd -a $USER kvm 2>/dev/null || true
           sudo chown $USER /dev/kvm 2>/dev/null || sudo chmod 666 /dev/kvm 2>/dev/null || true
           ls -la /dev/kvm || true
 
-      - name: E2E Android Emulator Test (API 34 + KVM)
+      - name: E2E Emulator Test (API 34)
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -345,52 +552,45 @@ jobs:
           emulator-boot-timeout: 600
           script: |
             set -e
-            echo "=== Locating APK ==="
+            echo "=== Find APK ==="
             APK_FILE=$(find _paperclip/ui/android/app/build/outputs/apk -name "*.apk" -not -name "*unsigned*" | head -1)
             [ -z "$APK_FILE" ] && APK_FILE=$(find _paperclip/ui/android/app/build/outputs/apk -name "*.apk" | head -1)
-            echo "Using APK: $APK_FILE"
+            echo "APK: $APK_FILE"
             ls -lh "$APK_FILE"
 
-            echo "=== Installing APK ==="
+            echo "=== Install ==="
             adb wait-for-device
             adb shell settings put global window_animation_scale 0 || true
             adb shell settings put global transition_animation_scale 0 || true
             adb shell settings put global animator_duration_scale 0 || true
             adb install -r "$APK_FILE"
 
-            echo "=== Launching Paperclip ==="
+            echo "=== Launch ==="
             adb shell am start -n com.paperclip.app/.MainActivity
 
-            echo "=== Monitoring app launch + logcat ==="
+            echo "=== Monitor launch ==="
             OK=0
             for i in $(seq 1 30); do
               sleep 3
               PID=$(adb shell pidof com.paperclip.app 2>/dev/null || echo "none")
-              echo "App PID: $PID (tick $i/30)"
-
-              # Check if app is running
+              echo "PID: $PID (tick $i/30)"
               if [ "$PID" != "none" ] && [ -n "$PID" ]; then
-                echo "✓ App is running (PID: $PID)"
+                echo "✓ App running (PID: $PID)"
                 OK=1
                 break
               fi
             done
 
-            echo "=== Logcat output ==="
-            adb logcat -d -s PaperclipMain:I PaperclipKeepAlive:I PaperclipKA:I AndroidRuntime:E 2>/dev/null | tail -50 || true
+            echo "=== Logcat ==="
+            adb logcat -d -s PaperclipMain:I PaperclipKA:I PaperclipBoot:I AndroidRuntime:E 2>/dev/null | tail -50 || true
 
-            if [ "$OK" != "1" ]; then
-              echo "--- Fallback: full recent logs ---"
-              adb logcat -d 2>/dev/null | grep -i "paperclip\|capacitor\|webview" | tail -30 || true
-            fi
-
-            echo "=== Final state ==="
+            echo "=== Activity dump ==="
             adb shell dumpsys activity activities | grep -i "paperclip" | head -5 || true
 
       # ═══════════════════════════════════════════════════════════
-      # 12. UPLOAD ARTIFACTS
+      # 8. UPLOAD ARTIFACTS + RELEASE
       # ═══════════════════════════════════════════════════════════
-      - name: Upload APK artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Paperclip-${{ inputs.build_type || 'release' }}-apk
@@ -398,27 +598,13 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload AAB artifact
-        if: inputs.build_type == 'release'
-        uses: actions/upload-artifact@v4
-        with:
-          name: Paperclip-${{ inputs.build_type || 'release' }}-aab
-          path: _paperclip/ui/android/app/build/outputs/bundle/**/*.aab
-          if-no-files-found: warn
-          retention-days: 30
-
-      # ═══════════════════════════════════════════════════════════
-      # 13. GITHUB RELEASE (main branch + release build only)
-      # ═══════════════════════════════════════════════════════════
       - name: Create GitHub Release
         if: inputs.build_type == 'release' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: paperclip-apk-${{ github.run_number }}
           name: Paperclip APK #${{ github.run_number }}
-          files: |
-            _paperclip/ui/android/app/build/outputs/apk/**/*.apk
-            _paperclip/ui/android/app/build/outputs/bundle/**/*.aab
+          files: _paperclip/ui/android/app/build/outputs/apk/**/*.apk
           draft: false
           prerelease: true
           generate_release_notes: true
