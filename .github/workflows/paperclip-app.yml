@@ -138,18 +138,38 @@ jobs:
           npm init -y >/dev/null
           npm install @capacitor/core @capacitor/cli @capacitor/android
 
-      - name: Init Capacitor + Add Android (manual)
+      - name: Generate Capacitor config + Android project (manual)
         working-directory: _paperclip/ui
         run: |
           set -euo pipefail
-          export CAP="/tmp/cap/node_modules/.bin/cap"
-          chmod +x "$CAP" 2>/dev/null || true
-          "$CAP" init "Paperclip" com.paperclip.app --web-dir dist
-          "$CAP" add android
-          echo '=== capacitor.config.json ==='
-          cat capacitor.config.json 2>/dev/null || cat capacitor.config.ts 2>/dev/null || echo 'no config found'
+
+          # Write capacitor.config.json
+          cat > capacitor.config.json <<'CAPCFG'
+          {
+            "appId": "com.paperclip.app",
+            "appName": "Paperclip",
+            "webDir": "dist",
+            "server": {
+              "androidScheme": "https",
+              "cleartext": true,
+              "allowNavigation": ["*"]
+            },
+            "android": {
+              "allowMixedContent": true,
+              "captureInput": true
+            }
+          }
+          CAPCFG
+          echo 'capacitor.config.json written'
+
+          # Generate Android project via cap CLI using node directly
+          cd /tmp/cap
+          node node_modules/@capacitor/cli/bin/cap init "Paperclip" com.paperclip.app --web-dir $(realpath /_paperclip/ui/dist)
+          cd /_paperclip/ui
+          /tmp/cap/node_modules/.bin/cap add android || node /tmp/cap/node_modules/@capacitor/cli/bin/cap add android
+
           echo '=== android dir ==='
-          ls android/ 2>/dev/null || echo 'no android dir'
+          ls android/ 2>/dev/null || echo 'NO android dir generated'
 
       - name: Inject keep-alive (manifest + service + receiver)
         working-directory: _paperclip/ui
