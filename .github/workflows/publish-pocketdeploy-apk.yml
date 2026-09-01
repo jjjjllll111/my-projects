@@ -90,7 +90,7 @@ jobs:
       - name: Install NDK + platforms
         run: |
           set -euo pipefail
-          sdkmanager --install "ndk;29.0.14206865" "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+          sdkmanager --install "ndk;29.0.14206865" "platforms;android-37" "build-tools;37.0.0" "platform-tools"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
 
       - name: Install 9router deps
