@@ -258,7 +258,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/sea-libs"; cp -a "$AGG"/* "$RUNNER_TEMP/sea-libs"/ 2>/dev/null || true
           echo "SEA host + libs ready: $(ls "$RUNNER_TEMP/sea-libs" | wc -l) libs"
 
-            - name: Stage clean Bionic Node runtime assets & native libraries
+      - name: Stage clean Bionic Node runtime assets & native libraries
         run: |
           set -euo pipefail
           STRIP="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
@@ -496,4 +496,3 @@ jobs:
           path: android/${{ env.APK }}
           if-no-files-found: error
           retention-days: 30
-
