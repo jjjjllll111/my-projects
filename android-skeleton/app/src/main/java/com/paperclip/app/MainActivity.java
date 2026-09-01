@@ -45,21 +45,15 @@ public class MainActivity extends Activity {
         settings.setUserAgentString(settings.getUserAgentString() + " PaperclipApp/1.0");
 
         // WebViewAssetLoader maps https://appassets.androidstudio.net/ -> assets/
-        // This avoids CORS issues with file:// origin
         final WebViewAssetLoader assetLoader = new WebViewAssetLoader.Builder()
             .addPathHandler("/", new AssetsPathHandler(this))
             .build();
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
-            public WebResourceRequest shouldInterceptRequest(WebView view, WebResourceRequest request) {
-                return request;
-            }
-
-            @Override
-            public WebResourceRequest shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                // Let WebViewAssetLoader handle asset URLs
-                return super.shouldOverrideUrlLoading(view, request);
+            public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                // Let WebViewAssetLoader handle all asset URLs
+                return false;
             }
         });
 
