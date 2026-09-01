@@ -77,8 +77,8 @@ jobs:
 
       - name: Install NDK + platforms
         run: |
-          sdkmanager --install "ndk;27.2.12479018" "platforms;android-35" "build-tools;35.0.0" "platform-tools"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          sdkmanager --install "ndk;29.0.14206865" "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
 
       # ── Cache: Termux node + shared libs ────────────────────
       - name: Cache SEA dependencies
@@ -256,8 +256,8 @@ jobs:
           set -euo pipefail
           chmod +x gradlew 2>/dev/null || true
           if ! ./gradlew --version 2>/dev/null; then
-            curl -fsSL -o /tmp/gradle.zip "https://services.gradle.org/distributions/gradle-8.6-bin.zip"
-            cd /tmp && unzip -qo gradle.zip && export PATH=/tmp/gradle-8.6/bin:$PATH
+            curl -fsSL -o /tmp/gradle.zip "https://services.gradle.org/distributions/gradle-9.7.1-bin.zip"
+            cd /tmp && unzip -qo gradle.zip && export PATH=/tmp/gradle-9.7.1/bin:$PATH
           fi
           gradle --version | head -3
           if [ "${{ inputs.build_type }}" = "debug" ]; then
