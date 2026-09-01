@@ -333,7 +333,10 @@ jobs:
           ls -lh "$RUNNER_TEMP/myapp"
           readelf -d "$RUNNER_TEMP/myapp" | grep NEEDED || true
 
-          # Stage for APK: only jniLibs/arm64-v8a/libmyapp.so (nativeLibraryDir, W^X safe) - assets/myapp deduped (-48M)
+          # Stage for APK: both assets/myapp (x86_64 emulator fallback) + jniLibs/arm64-v8a/libmyapp.so (arm64 W^X) - jniLibs filtered on x86_64
+          mkdir -p android/app/src/main/assets
+          cp "$RUNNER_TEMP/myapp" android/app/src/main/assets/myapp
+          chmod +x android/app/src/main/assets/myapp
           mkdir -p android/app/src/main/jniLibs/arm64-v8a
           cp "$RUNNER_TEMP/myapp" android/app/src/main/jniLibs/arm64-v8a/libmyapp.so
           # Also stage node-libs for LD_LIBRARY_PATH (myapp NEEDED .so deps)
@@ -341,7 +344,7 @@ jobs:
             mkdir -p android/app/src/main/assets/node-libs
             cp -n "$RUNNER_TEMP/sea-libs"/* android/app/src/main/assets/node-libs/ 2>/dev/null || true
           fi
-          echo "myapp staged: jniLibs/libmyapp.so $(du -sh android/app/src/main/jniLibs/arm64-v8a/libmyapp.so | cut -f1)"
+          echo "myapp staged: assets/myapp + jniLibs/libmyapp.so $(du -sh android/app/src/main/jniLibs/arm64-v8a/libmyapp.so | cut -f1)"
 
       - name: Bundle headroom (proxy+code + Kompress-v2 ml model, latest, baked offline)
         run: |
@@ -374,6 +377,23 @@ jobs:
           cp -a "$HF_ROOT/kompress-v2-base" "$ASSET_HR/models"/ 2>/dev/null || true
           echo "headroom staged: wheels=$(du -sh "$ASSET_HR/wheels" | cut -f1) models=$(du -sh "$ASSET_HR/models" | cut -f1) total=$(du -sh "$ASSET_HR" | cut -f1) files=$(find "$ASSET_HR" -type f | wc -l)"
           ls "$ASSET_HR/wheels" | wc -l; ls "$ASSET_HR/models/kompress-v2-base" | head -20 || true
+
+      - name: Bundle python Bionic closure for Headroom (self-contained, no system python)
+        run: |
+          set -euo pipefail
+          echo "=== Bundling Termux python Bionic closure for Headroom ==="
+          PY_TMP="$RUNNER_TEMP/termux-python-headroom"; rm -rf "$PY_TMP"; mkdir -p "$PY_TMP/agg"
+          PKGINDEX="$PY_TMP/Packages"
+          curl -fsSL https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages -o "$PKGINDEX"
+          py_pkg_file() { awk -v RS= -v FS='\n' -v pat="^Package: $1\$" '$1 ~ pat { for(i=1;i<=NF;i++) if($i ~ /^Filename:/){ sub(/^Filename: /,"",$i); print $i; exit } }' "$PKGINDEX"; }
+          py_expand_deb() { local deb="$1" dest="$2"; local tmp; tmp=$(mktemp -d); (cd "$tmp" && ar x "$deb" && tar -xf data.tar.* -C "$dest"); rm -rf "$tmp"; }
+          for pkg in python libpython openssl libffi readline libsqlite zlib libicu libc++ libandroid-shmem; do F=$(py_pkg_file "$pkg" || true); [ -z "$F" ] && { echo "::warning::python pkg $pkg not found"; continue; }; echo "fetch python-dep $pkg -> $F"; curl -fsSL "https://packages.termux.dev/apt/termux-main/$F" -o "$PY_TMP/$pkg.deb" || { echo "::warning::fetch $pkg failed"; continue; }; mkdir -p "$PY_TMP/libs/$pkg"; py_expand_deb "$PY_TMP/$pkg.deb" "$PY_TMP/libs/$pkg"; done
+          PY_DEST="android/app/src/main/assets/headroom/python"; rm -rf "$PY_DEST"; mkdir -p "$PY_DEST"
+          if [ -d "$PY_TMP/libs/python/data/data/com.termux/files/usr" ]; then cp -a "$PY_TMP/libs/python/data/data/com.termux/files/usr/." "$PY_DEST"/; echo "python usr staged"; fi
+          for d in "$PY_TMP/libs"/*; do [ -d "$d" ] || continue; find "$d" -type f -name "*.so*" | while read -r so; do cp -n "$so" "$PY_DEST/lib"/ 2>/dev/null || (mkdir -p "$PY_DEST/lib" && cp -n "$so" "$PY_DEST/lib"/); done; done
+          find "$PY_DEST" -type f -name "python3*" | xargs chmod +x 2>/dev/null || true
+          echo "python closure staged: $(du -sh "$PY_DEST" | cut -f1) files=$(find "$PY_DEST" -type f | wc -l)"
+          ls "$PY_DEST/bin" 2>/dev/null | head -20 || echo "no bin"; ls "$PY_DEST/lib" 2>/dev/null | head -20 || true
 
       - name: Verify APK pre-flight (STRICT SEA — fail fast, no fallback)
         run: |
