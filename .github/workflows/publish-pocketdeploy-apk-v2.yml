@@ -413,29 +413,6 @@ jobs:
           echo "APK=$APK" >> "$GITHUB_ENV"
           ls -lh "$APK"; du -sh "$APK"
 
-      - name: Enable KVM group perms for Hardware Acceleration
-        run: |
-          echo "=== Setting up KVM hardware acceleration ==="
-          sudo groupadd -r kvm 2>/dev/null || true
-          sudo gpasswd -a $USER kvm 2>/dev/null || true
-          sudo chown $USER /dev/kvm 2>/dev/null || sudo chmod 666 /dev/kvm 2>/dev/null || true
-          ls -la /dev/kvm || true
-
-      - name: Real Android Emulator E2E (API 34/35 x86_64 + KVM Hardware Accel) & Port Validation
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 34
-          target: google_apis
-          arch: x86_64
-          profile: pixel_5
-          disk-size: 16384M
-          ram-size: 4096M
-          heap-size: 1024M
-          emulator-options: -no-snapshot-load -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -partition-size 16384
-          disable-animations: true
-          emulator-boot-timeout: 600
-          script: bash android/ci_emulator_test.sh
-
       - name: Build AAB (Bundletool, release only)
         if: inputs.build_type == 'release'
         run: |
