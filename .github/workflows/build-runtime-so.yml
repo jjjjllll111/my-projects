@@ -1,0 +1,133 @@
+name: Build Android JNI runtimes
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_arch:
+        description: Target ABI
+        required: false
+        default: "aarch64"
+      upload_artifact:
+        description: Upload to GHA artifact
+        required: false
+        default: "true"
+
+permissions:
+  contents: read
+
+jobs:
+  bundle-runtime:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Fetch and package official Termux Node.js & Python Bionic closure
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCH="${{ inputs.target_arch || 'aarch64' }}"
+          ABI="arm64-v8a"
+          if [ "$ARCH" = "aarch64" ]; then ABI="arm64-v8a"; fi
+
+          TMP="$RUNNER_TEMP/runtime-fetch"
+          mkdir -p "$TMP/debs" "$TMP/extracted"
+          OUT="runtime-libs/$ABI"
+          mkdir -p "$OUT" runtime-libs/metadata
+
+          PKGINDEX="$TMP/Packages"
+          echo "Fetching Termux package index for $ARCH..."
+          curl -fsSL "https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-$ARCH/Packages" -o "$PKGINDEX"
+
+          pkg_file() {
+            awk -v RS= -v FS='\n' -v pat="^Package: $1\$" '$1 ~ pat { for (i=1;i<=NF;i++) if ($i ~ /^Filename:/) { sub(/^Filename: /,"",$i); print $i; exit } }' "$PKGINDEX"
+          }
+
+          expand_deb() {
+            local deb="$1" dest="$2"
+            local t; t=$(mktemp -d)
+            (cd "$t" && ar x "$deb" && tar -xf data.tar.* -C "$dest")
+            rm -rf "$t"
+          }
+
+          # 1. Download Core Node & Python + all transitive native dependencies
+          DEPS="nodejs python libc++ libandroid-support libandroid-shmem libandroid-spawn openssl c-ares libsqlite zlib libffi libicu readline jemalloc"
+          for pkg in $DEPS; do
+            F=$(pkg_file "$pkg" || true)
+            if [ -z "$F" ]; then
+              echo "::warning::Package $pkg not found in index"
+              continue
+            fi
+            echo "Downloading $pkg from $F..."
+            curl -fsSL "https://packages.termux.dev/apt/termux-main/$F" -o "$TMP/debs/$pkg.deb"
+            mkdir -p "$TMP/extracted/$pkg"
+            expand_deb "$TMP/debs/$pkg.deb" "$TMP/extracted/$pkg"
+          done
+
+          # 2. Extract shared libraries into jniLibs compatible structure
+          echo "Collecting shared libraries into $OUT..."
+          find "$TMP/extracted" -type f -name "*.so*" | while read -r f; do
+            base=$(basename "$f")
+            cp -a "$f" "$OUT/$base" 2>/dev/null || true
+          done
+
+          # Handle symlinks
+          find "$TMP/extracted" -type l -name "*.so*" | while read -r l; do
+            t=$(readlink -f "$l" 2>/dev/null || true)
+            if [ -f "$t" ]; then
+              cp -a "$t" "$OUT/$(basename "$l")" 2>/dev/null || true
+            fi
+          done
+
+          # 3. Ensure libc++_shared.so is properly named
+          if [ ! -f "$OUT/libc++_shared.so" ]; then
+            for f in "$OUT"/libc*.so* "$OUT"/*c++*.so*; do
+              [ -f "$f" ] || continue
+              if file "$f" | grep -qi "shared object"; then
+                echo "Mapping $(basename "$f") -> libc++_shared.so"
+                cp -a "$f" "$OUT/libc++_shared.so"
+                break
+              fi
+            done
+          fi
+
+          # 4. Remove unversioned system libs that clash with Android bionic (libc, libm, libdl)
+          rm -f "$OUT/libc.so" "$OUT/libm.so" "$OUT/libdl.so" "$OUT/libz.so" || true
+          # Retain versioned libz.so.1 for node ELF DT_NEEDED
+          find "$TMP/extracted/zlib" -name "*libz.so.1*" -exec cp -a {} "$OUT/libz.so.1" \; 2>/dev/null || true
+
+          # 5. Extract binaries (node, python3)
+          mkdir -p runtime-libs/bin
+          if [ -f "$TMP/extracted/nodejs/data/data/com.termux/files/usr/bin/node" ]; then
+            cp "$TMP/extracted/nodejs/data/data/com.termux/files/usr/bin/node" runtime-libs/bin/node
+            chmod +x runtime-libs/bin/node
+          fi
+          if [ -f "$TMP/extracted/python/data/data/com.termux/files/usr/bin/python3" ]; then
+            cp "$TMP/extracted/python/data/data/com.termux/files/usr/bin/python3" runtime-libs/bin/python3
+            chmod +x runtime-libs/bin/python3
+          fi
+
+          # Metadata
+          echo "ARCH=$ARCH" > runtime-libs/metadata/build_info.txt
+          echo "DATE=$(date -u)" >> runtime-libs/metadata/build_info.txt
+          ls -lh "$OUT" >> runtime-libs/metadata/build_info.txt
+
+      - name: Validate runtime closure
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== Summary of collected libraries ==="
+          ls -lh runtime-libs/arm64-v8a/
+          test -f runtime-libs/arm64-v8a/libc++_shared.so || { echo "FATAL: libc++_shared.so missing"; exit 1; }
+          test -f runtime-libs/arm64-v8a/libz.so.1 || { echo "FATAL: libz.so.1 missing"; exit 1; }
+          test -f runtime-libs/arm64-v8a/libcrypto.so.3 || { echo "FATAL: libcrypto.so.3 missing"; exit 1; }
+
+      - name: Upload JNI runtime libraries
+        if: inputs.upload_artifact != 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pocketdeploy-runtimes-arm64-v8a
+          path: runtime-libs
+          if-no-files-found: error
+          retention-days: 30
