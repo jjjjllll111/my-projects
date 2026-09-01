@@ -312,8 +312,7 @@ jobs:
             adb shell rm -f /data/local/tmp/app.apk || true
             adb shell am start -n com.paperclip.app/.MainActivity
             adb forward tcp:3100 tcp:3100 || true
-            adb forward tcp:8089 tcp:8089 || true
-            bash -c 'OK=0; for i in $(seq 1 45); do sleep 3; PID=$(adb shell pidof com.paperclip.app 2>/dev/null || echo ""); echo "[Tick $i/45] PID=$PID"; RESP=$(curl -s --max-time 3 "http://127.0.0.1:8089/" 2>/dev/null || true); RESP3100=$(curl -s --max-time 3 "http://127.0.0.1:3100/api/health" 2>/dev/null || true); if [ -n "$RESP" ] || [ -n "$RESP3100" ]; then echo "Server UP!"; OK=1; fi; if [ "$OK" = "1" ]; then sleep 3; break; fi; done; adb logcat -d -s PaperclipMain:I PaperclipKA:I NodeRunner:I RouterService:I AndroidRuntime:E 2>/dev/null | tail -80 || true; echo "=== E2E RESULT ==="; if [ "$OK" = "1" ]; then echo "PASS"; else echo "WARN: server not responding (check logcat above)"; fi'
+            bash -c 'OK=0; for i in $(seq 1 45); do sleep 3; PID=$(adb shell pidof com.paperclip.app 2>/dev/null || echo ""); echo "[Tick $i/45] PID=$PID"; RESP3100=$(curl -s --max-time 3 "http://127.0.0.1:3100/api/health" 2>/dev/null || true); if [ -n "$RESP3100" ]; then echo "Server UP!"; OK=1; fi; if [ "$OK" = "1" ]; then sleep 3; break; fi; done; adb logcat -d -s PaperclipMain:I PaperclipKA:I NodeRunner:I RouterService:I AndroidRuntime:E 2>/dev/null | tail -80 || true; echo "=== E2E RESULT ==="; if [ "$OK" = "1" ]; then echo "PASS"; else echo "WARN: server not responding (check logcat above)"; fi'
 
       # ── Upload + Release ────────────────────────────────────
       - uses: actions/upload-artifact@v4
