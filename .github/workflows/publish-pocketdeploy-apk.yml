@@ -192,7 +192,7 @@ jobs:
           file "$RUNNER_TEMP/sea-host/node-bionic"; readelf -h "$RUNNER_TEMP/sea-host/node-bionic" | head -20 || true
           # Also produce legacy assets/node-bionic + node-libs for fallback
           DEST="android/app/src/main/assets/node-bionic"; mkdir -p "$(dirname "$DEST")"; cp "$NODE_BIN" "$DEST"; chmod +x "$DEST"
-          DEPS="zlib c-ares libsqlite libffi openssl libicu libc++ libandroid-shmem libandroid-spawn"
+          DEPS="zlib c-ares libsqlite libffi openssl libicu libc++ libandroid-shmem libandroid-spawn jemalloc"
           for pkg in $DEPS; do F=$(pkg_file "$pkg" || true); [ -z "$F" ] && { echo "::warning::pkg $pkg not found"; continue; }; echo "fetch $pkg -> $F"; curl -fsSL "https://packages.termux.dev/apt/termux-main/$F" -o "$TMP/$pkg.deb" || { echo "::warning::fetch $pkg failed"; continue; }; mkdir -p "$TMP/libs/$pkg"; expand_deb "$TMP/$pkg.deb" "$TMP/libs/$pkg"; done
           AGG="$TMP/libs/_agg"; mkdir -p "$AGG"
           find "$TMP/libs" -type f -name "*.so*" -not -path "*/_agg/*" | while read -r f; do cp -n "$f" "$AGG"/ 2>/dev/null || cp "$f" "$AGG"/; done
