@@ -194,7 +194,9 @@ jobs:
           TMP="$RUNNER_TEMP/termux-node"; rm -rf "$TMP"; mkdir -p "$TMP/nex" "$TMP/libs"
           PKGINDEX="$TMP/Packages"
           curl -fsSL https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages -o "$PKGINDEX"
-          pkg_file() { awk -v RS= -v FS='\n' -v pat="^Package: $1\$" '$1 ~ pat { for (i=1;i<=NF;i++) if ($i ~ /^Filename:/) { sub(/^Filename: /,"",$i); print $i; exit } }' "$PKGINDEX"; }
+          pkg_file() {
+            awk -v RS= -v FS='\n' -v pkg="$1" '$1 == ("Package: " pkg) { for (i=1;i<=NF;i++) if ($i ~ /^Filename:/) { sub(/^Filename: /,"",$i); print $i; exit } }' "$PKGINDEX"
+          }
           expand_deb() { local deb="$1" dest="$2"; local tmp; tmp=$(mktemp -d); (cd "$tmp" && ar x "$deb" && tar -xf data.tar.* -C "$dest"); rm -rf "$tmp"; }
           NF=$(pkg_file nodejs); [ -z "$NF" ] && { echo "FATAL: nodejs not in Packages"; exit 1; }
           curl -fsSL "https://packages.termux.dev/apt/termux-main/$NF" -o "$TMP/node.deb"
