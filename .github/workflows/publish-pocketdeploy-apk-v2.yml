@@ -258,7 +258,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/sea-libs"; cp -a "$AGG"/* "$RUNNER_TEMP/sea-libs"/ 2>/dev/null || true
           echo "SEA host + libs ready: $(ls "$RUNNER_TEMP/sea-libs" | wc -l) libs"
 
-            - name: Normalize ELF DT_NEEDED sonames with patchelf & llvm-strip
+      - name: Normalize ELF DT_NEEDED sonames with patchelf & llvm-strip
         run: |
           set -euo pipefail
           sudo apt-get update -qq && sudo apt-get install -y -qq patchelf
