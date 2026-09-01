@@ -73,7 +73,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
           cache-dependency-path: _9router/package-lock.json
 
@@ -157,19 +157,6 @@ jobs:
           if(reg.length){console.error("BROKEN: "+reg.join(","));process.exit(3)}
           OPT_EOF
           OPT_STRIP_GLIBC_NATIVE=1 node "$RUNNER_TEMP/optimize-bundle.mjs" _9router/cli/app
-
-      - name: Sync 9router standalone -> android assets (legacy fallback)
-        run: |
-          set -euo pipefail
-          STANDALONE="_9router/.next/standalone"
-          ASSETS="android/app/src/main/assets/9router"
-          rm -rf "$ASSETS"; mkdir -p "$ASSETS"
-          cp -a "$STANDALONE"/. "$ASSETS"/
-          if [ ! -f "$ASSETS/custom-server.js" ] && [ -f "_9router/custom-server.js" ]; then cp "_9router/custom-server.js" "$ASSETS"/; fi
-          if [ -d "_9router/cli/app/node_modules" ]; then mkdir -p "$ASSETS/node_modules"; cp -rn _9router/cli/app/node_modules/. "$ASSETS/node_modules"/ 2>/dev/null || cp -r _9router/cli/app/node_modules/. "$ASSETS/node_modules"/; fi
-          if [ -d "_9router/cli/app/engine-models" ]; then mkdir -p "$ASSETS/engine-models"; cp -rn _9router/cli/app/engine-models/. "$ASSETS/engine-models"/ 2>/dev/null || true; fi
-          echo "assets 9router: $(du -sh "$ASSETS" | cut -f1) files=$(find "$ASSETS" -type f | wc -l)"
-          test -f "$ASSETS/server.js" || test -f "$ASSETS/custom-server.js" || { echo "FATAL: no entry"; exit 1; }
 
       - name: Extract bionic node closure (NDK/Bionic arm64 ELF — fast path)
         if: inputs.build_node_from_source != 'true'
@@ -324,10 +311,7 @@ jobs:
           ls -lh "$RUNNER_TEMP/myapp"
           readelf -d "$RUNNER_TEMP/myapp" | grep NEEDED || true
 
-          # Stage for APK: assets/myapp (filesDir fallback) + jniLibs/arm64-v8a/libmyapp.so (nativeLibraryDir, W^X safe)
-          mkdir -p android/app/src/main/assets
-          cp "$RUNNER_TEMP/myapp" android/app/src/main/assets/myapp
-          chmod +x android/app/src/main/assets/myapp
+          # Stage for APK: only jniLibs/arm64-v8a/libmyapp.so (nativeLibraryDir, W^X safe) - assets/myapp deduped (-48M)
           mkdir -p android/app/src/main/jniLibs/arm64-v8a
           cp "$RUNNER_TEMP/myapp" android/app/src/main/jniLibs/arm64-v8a/libmyapp.so
           # Also stage node-libs for LD_LIBRARY_PATH (myapp NEEDED .so deps)
@@ -335,7 +319,7 @@ jobs:
             mkdir -p android/app/src/main/assets/node-libs
             cp -n "$RUNNER_TEMP/sea-libs"/* android/app/src/main/assets/node-libs/ 2>/dev/null || true
           fi
-          echo "myapp staged: $(du -sh android/app/src/main/assets/myapp | cut -f1) + jniLibs/libmyapp.so $(du -sh android/app/src/main/jniLibs/arm64-v8a/libmyapp.so | cut -f1)"
+          echo "myapp staged: jniLibs/libmyapp.so $(du -sh android/app/src/main/jniLibs/arm64-v8a/libmyapp.so | cut -f1)"
 
       - name: Bundle headroom (proxy+code + Kompress-v2 ml model, latest, baked offline)
         run: |
@@ -372,12 +356,11 @@ jobs:
       - name: Verify APK pre-flight (STRICT SEA — fail fast, no fallback)
         run: |
           set -euo pipefail
-          echo "=== assets preview ==="; ls -lh android/app/src/main/assets/ 2>&1 | head -30 || true; ls android/app/src/main/assets/node-libs 2>&1 | head -20 || true; ls android/app/src/main/jniLibs/arm64-v8a/ 2>&1 | head -20 || true; echo "--- du ---"; du -sh android/app/src/main/assets/9router 2>&1 | head -5 || true; du -sh android/app/src/main/assets/node-libs 2>&1 | head -5 || true; du -sh android/app/src/main/assets/myapp 2>&1 | head -5 || true; du -sh android/app/src/main/assets 2>&1 | head -5 || true
-          test -f android/app/src/main/assets/myapp || { echo "::error::STRICT: assets/myapp missing (SEA build failed)"; exit 1; }
-          test -f android/app/src/main/jniLibs/arm64-v8a/libmyapp.so || { echo "::error::STRICT: jniLibs libmyapp.so missing"; exit 1; }
-          file android/app/src/main/assets/myapp 2>&1 | head -5 || true
-          # Ensure no legacy node-bionic is mistaken for success — SEA must be present
-          if ! file android/app/src/main/assets/myapp | grep -qi "aarch64"; then echo "::error::myapp is not AArch64 ELF"; exit 1; fi
+          echo "=== assets/jniLibs preview ==="; ls -lh android/app/src/main/assets/ 2>&1 | head -30 || true; ls android/app/src/main/assets/node-libs 2>&1 | head -20 || true; ls -lh android/app/src/main/jniLibs/arm64-v8a/ 2>&1 | head -20 || true; echo "--- du ---"; du -sh android/app/src/main/assets/9router 2>&1 | head -5 || true; du -sh android/app/src/main/assets/node-libs 2>&1 | head -5 || true; du -sh android/app/src/main/jniLibs 2>&1 | head -5 || true; du -sh android/app/src/main/assets 2>&1 | head -5 || true
+          test -f android/app/src/main/jniLibs/arm64-v8a/libmyapp.so || { echo "::error::STRICT: jniLibs libmyapp.so missing (SEA build failed)"; exit 1; }
+          file android/app/src/main/jniLibs/arm64-v8a/libmyapp.so 2>&1 | head -5 || true
+          # Ensure SEA is AArch64 ELF
+          if ! file android/app/src/main/jniLibs/arm64-v8a/libmyapp.so | grep -qi "aarch64"; then echo "::error::myapp is not AArch64 ELF"; exit 1; fi
 
       - name: Build APK (Gradle)
         run: |
@@ -441,37 +424,17 @@ jobs:
             bundletool get-size total --apks=/tmp/app.apks 2>&1 | head -20 || true
           fi
 
-      - name: Generate Baseline Profile (dex2oat speed-profile)
-        if: inputs.build_type == 'release'
-        run: |
-          set -euo pipefail
-          # Minimal baseline-prof.txt — hot path: MainActivity + RouterService + HeadroomRunner
-          cat > android/app/src/main/baseline-prof.txt <<'PROF'
-          HLcom/pocketdeploy/app/MainActivity;  # hot startup
-          HLcom/pocketdeploy/app/router/RouterService;  # keepalive + 20128
-          HLcom/pocketdeploy/app/router/NodeRunner;  # SEA spawn
-          HLcom/pocketdeploy/app/headroom/HeadroomRunner;  # proxy 8787
-          HLcom/pocketdeploy/app/PDLog;  # hot logger
-          PROF
-          cat android/app/src/main/baseline-prof.txt
-          # R8 will consume baseline via profileinstaller; verify file exists
-          ls -lh android/app/src/main/baseline-prof.txt
-          # Verify dex2oat profile compilation on device would use speed-profile
-          echo "baseline-prof ready for dex2oat --compiler-filter=speed-profile (install-time AOT)"
-
       - name: Verify APK (STRICT SEA — no node-bionic fallback)
         run: |
           set -euo pipefail
           APK="android/${{ env.APK }}"
           echo "=== APK contents (assets/jniLibs) ==="
-          (unzip -l "$APK" | grep -E "assets/9router|assets/myapp|assets/headroom|assets/node-bionic|assets/node-libs|lib/arm64-v8a/libmyapp|classes" | head -80 || true)
-          if ! unzip -l "$APK" | grep -q "assets/myapp"; then echo "::error::STRICT: assets/myapp missing in APK (SEA injection failed)"; exit 1; fi
-          if ! unzip -l "$APK" | grep -q "lib/arm64-v8a/libmyapp.so"; then echo "::error::STRICT: lib/arm64-v8a/libmyapp.so missing in APK"; exit 1; fi
-          # Legacy node-bionic must NOT be relied on — if present it's just dead weight, warn but not required
+          (unzip -l "$APK" | grep -E "assets/9router|assets/headroom|assets/node-libs|lib/arm64-v8a/libmyapp|classes" | head -80 || true)
+          if ! unzip -l "$APK" | grep -q "lib/arm64-v8a/libmyapp.so"; then echo "::error::STRICT: lib/arm64-v8a/libmyapp.so missing in APK (SEA injection failed)"; exit 1; fi
           if unzip -l "$APK" | grep -q "assets/node-bionic"; then echo "::notice::legacy assets/node-bionic still in APK (ignored at runtime)"; fi
           if ! unzip -l "$APK" | grep -q "assets/9router/server.js\|assets/9router/custom-server.js"; then echo "::error::assets/9router entry missing"; exit 1; fi
           if ! unzip -l "$APK" | grep -q "assets/9router/engine-models"; then echo "::error::STRICT: engine-models not baked (offline llmlingua missing)"; exit 1; fi
-          if unzip -p "$APK" "assets/myapp" > /tmp/_apk_myapp 2>/dev/null && [ -s /tmp/_apk_myapp ]; then echo "myapp in APK:"; file /tmp/_apk_myapp | head -5 || true; readelf -h /tmp/_apk_myapp 2>&1 | head -10 || true; if ! file /tmp/_apk_myapp | grep -qi "aarch64"; then echo "::error::myapp in APK is not AArch64 ELF"; exit 1; fi; fi
+          if unzip -p "$APK" "lib/arm64-v8a/libmyapp.so" > /tmp/_apk_myapp 2>/dev/null && [ -s /tmp/_apk_myapp ]; then echo "myapp in APK:"; file /tmp/_apk_myapp | head -5 || true; readelf -h /tmp/_apk_myapp 2>&1 | head -10 || true; if ! file /tmp/_apk_myapp | grep -qi "aarch64"; then echo "::error::myapp in APK is not AArch64 ELF"; exit 1; fi; fi
           du -sh "$APK"
           if [ -n "${{ env.AAB }}" ]; then echo "AAB: $AAB"; ls -lh "$AAB" 2>&1 | head -5 || true; du -sh "$AAB" 2>&1 | head -5 || true; fi
 
@@ -483,11 +446,4 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload SEA myapp standalone (arm64 ELF)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: myapp-arm64-bionic-SEA
-          path: android/app/src/main/assets/myapp
-          if-no-files-found: warn
-          retention-days: 30
+
