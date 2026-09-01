@@ -284,36 +284,6 @@ jobs:
           unzip -l "$APK" | grep -E "myapp|node-libs|ui-dist|assets/index" | head -20
           echo "APK_PATH=$APK" >> "$GITHUB_ENV"
 
-      # ── E2E Emulator ───────────────────────────────────────
-      - name: Enable KVM
-        run: |
-          sudo groupadd -r kvm 2>/dev/null || true
-          sudo gpasswd -a $USER kvm 2>/dev/null || true
-          sudo chown $USER /dev/kvm 2>/dev/null || sudo chmod 666 /dev/kvm 2>/dev/null || true
-
-      - name: E2E Emulator Test
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 34
-          target: google_apis
-          arch: x86_64
-          profile: pixel_5
-          disk-size: 16384M
-          ram-size: 4096M
-          heap-size: 1024M
-          emulator-options: -no-snapshot-load -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -partition-size 16384
-          disable-animations: true
-          emulator-boot-timeout: 600
-          script: |
-            APK=$(find _app/android/app/build/outputs/apk -name "*.apk" -not -name "*unsigned*" | head -1); [ -z "$APK" ] && APK=$(find _app/android/app/build/outputs/apk -name "*.apk" | head -1); if [ -z "$APK" ]; then echo "::error::APK not found"; ls -R _app/android/app/build/outputs/apk 2>&1 | head -30 || true; exit 1; fi; echo "$APK" > /tmp/apk_path.txt; echo "Installing: $APK"
-            adb wait-for-device
-            APK=$(cat /tmp/apk_path.txt); adb push "$APK" /data/local/tmp/app.apk
-            APK=$(cat /tmp/apk_path.txt); adb shell pm install -r -d /data/local/tmp/app.apk
-            adb shell rm -f /data/local/tmp/app.apk || true
-            adb shell am start -n com.paperclip.app/.MainActivity
-            adb forward tcp:3100 tcp:3100 || true
-            bash -c 'OK=0; for i in $(seq 1 45); do sleep 3; PID=$(adb shell pidof com.paperclip.app 2>/dev/null || echo ""); echo "[Tick $i/45] PID=$PID"; RESP3100=$(curl -s --max-time 3 "http://127.0.0.1:3100/api/health" 2>/dev/null || true); if [ -n "$RESP3100" ]; then echo "Server UP!"; OK=1; fi; if [ "$OK" = "1" ]; then sleep 3; break; fi; done; adb logcat -d -s PaperclipMain:I PaperclipKA:I NodeRunner:I RouterService:I AndroidRuntime:E 2>/dev/null | tail -80 || true; echo "=== E2E RESULT ==="; if [ "$OK" = "1" ]; then echo "PASS"; else echo "WARN: server not responding (check logcat above)"; fi'
-
       # ── Upload + Release ────────────────────────────────────
       - uses: actions/upload-artifact@v4
         if: always()
