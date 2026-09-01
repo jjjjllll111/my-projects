@@ -211,12 +211,18 @@ jobs:
             for f in "$AGG"/libc*.so* "$AGG"/*c++*.so*; do [ -f "$f" ] || continue; if file "$f" 2>&1 | grep -qi "shared object"; then echo "mapping $(basename "$f") -> libc++_shared.so"; cp -a "$f" "$AGG/libc++_shared.so"; break; fi; done
           fi
           if [ ! -f "$AGG/libc++_shared.so" ] && ls "$TMP/libs/libc++"/data/data/com.termux/files/usr/lib/*.so* >/dev/null 2>&1; then cp -a "$TMP/libs/libc++"/data/data/com.termux/files/usr/lib/*.so* "$AGG"/ 2>/dev/null || true; fi
-          for so in $(readelf -d "$DEST" | grep -oP '(?<=Shared library: \[)[^\]]+'); do case "$so" in libc.so|libdl.so|libm.so|libz.so*|libcrypto.so*|libssl.so*) continue;; esac; if [ ! -f "$AGG/$so" ]; then echo "::warning::NEEDED $so MISSING in AGG (expected to be provided by Android system)"; fi; done
+          for so in $(readelf -d "$DEST" | grep -oP '(?<=Shared library: \[)[^\]]+'); do case "$so" in libc.so|libdl.so|libm.so) continue;; esac; if [ ! -f "$AGG/$so" ]; then echo "::warning::NEEDED $so MISSING in AGG: $so"; fi; done
           ls "$AGG" | sort | tr ' ' '\n' | head -50 || true; echo "AGG has libc++: $(ls "$AGG" | grep -i c++ 2>&1 | head -n 10 || echo none)"
           # Strip system-overlapping libraries that clash with Android's system linker/translation layer:
-          # (Android provides libz.so, libc.so, libm.so, libdl.so, libcrypto.so, libssl.so natively — having arm64 versions in LD_LIBRARY_PATH breaks translator/system)
-          echo "Removing conflicting system-overlapping libs from node-libs..."
-          rm -f "$AGG"/libz.so* "$AGG"/libc.so* "$AGG"/libm.so* "$AGG"/libdl.so* "$AGG"/libcrypto.so* "$AGG"/libssl.so* || true
+          # (Android provides libc.so, libm.so, libdl.so natively — but libz.so.1, libcrypto.so.3, libssl.so.3 are specifically versioned sonames needed by Node ELF)
+          echo "Refining system libs in node-libs (keep versioned sonames libz.so.1, remove unversioned libc/libm/libdl)..."
+          rm -f "$AGG"/libc.so "$AGG"/libm.so "$AGG"/libdl.so || true
+          # Keep libz.so.1 for node ELF DT_NEEDED, remove unversioned libz.so to prevent translator clash
+          rm -f "$AGG"/libz.so || true
+          rm -f "$AGG"/libcrypto.so "$AGG"/libssl.so || true
+          test -f "$AGG/libz.so.1" || cp -a "$TMP/libs/zlib"/*libz.so.1* "$AGG/libz.so.1" 2>/dev/null || true
+          test -f "$AGG/libcrypto.so.3" || cp -a "$TMP/libs/openssl"/*libcrypto.so.3* "$AGG/libcrypto.so.3" 2>/dev/null || true
+          test -f "$AGG/libssl.so.3" || cp -a "$TMP/libs/openssl"/*libssl.so.3* "$AGG/libssl.so.3" 2>/dev/null || true
           
           mkdir -p android/app/src/main/assets/node-libs; cp -a "$AGG"/* android/app/src/main/assets/node-libs/ 2>/dev/null || true
           echo "node-libs staged: $(ls android/app/src/main/assets/node-libs | wc -l) files -> $(du -sh android/app/src/main/assets/node-libs | cut -f1)"; ls android/app/src/main/assets/node-libs | grep -i "c++\|plus" | head -10 || echo "no c++ in node-libs"
