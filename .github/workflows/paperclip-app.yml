@@ -167,7 +167,8 @@ jobs:
               if file "$f" 2>&1 | grep -qi "shared object"; then cp -a "$f" "$AGG/libc++_shared.so"; break; fi
             done
           fi
-          rm -f "$AGG"/libz.so* "$AGG"/libc.so* "$AGG"/libm.so* "$AGG"/libdl.so* || true
+          rm -f "$AGG"/libc.so* "$AGG"/libm.so* "$AGG"/libdl.so* || true
+          # Keep libz.so* for myapp NEEDED libz.so.1
           echo "SEA deps cached: node=$(ls -lh "$RUNNER_TEMP/sea-host/node-bionic" | awk '{print $5}') libs=$(ls "$AGG" | wc -l)"
 
       # ── Build SEA binary (cached) ───────────────────────────
