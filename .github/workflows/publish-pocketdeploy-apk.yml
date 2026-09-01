@@ -158,6 +158,16 @@ jobs:
           OPT_EOF
           OPT_STRIP_GLIBC_NATIVE=1 node "$RUNNER_TEMP/optimize-bundle.mjs" _9router/cli/app
 
+      - name: Sync 9router standalone -> android assets
+        run: |
+          set -euo pipefail
+          STANDALONE="_9router/.next/standalone"
+          ASSETS="android/app/src/main/assets/9router"
+          rm -rf "$ASSETS"; mkdir -p "$ASSETS"
+          cp -a "$STANDALONE"/. "$ASSETS"/
+          echo "assets 9router: $(du -sh "$ASSETS" | cut -f1) files=$(find "$ASSETS" -type f | wc -l)"
+          test -f "$ASSETS/server.js" || test -f "$ASSETS/custom-server.js" || { echo "FATAL: 9router entry missing"; exit 1; }
+
       - name: Extract bionic node closure (NDK/Bionic arm64 ELF — fast path)
         if: inputs.build_node_from_source != 'true'
         run: |
