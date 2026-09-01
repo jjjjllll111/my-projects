@@ -306,9 +306,9 @@ jobs:
           emulator-boot-timeout: 600
           script: |
             set -e
-            APK="${{ env.APK_PATH }}"
-            [ -z "$APK" ] && APK=$(find _app/android/app/build/outputs/apk -name "*.apk" -not -name "*unsigned*" | head -1)
+            APK=$(find _app/android/app/build/outputs/apk -name "*.apk" -not -name "*unsigned*" | head -1)
             [ -z "$APK" ] && APK=$(find _app/android/app/build/outputs/apk -name "*.apk" | head -1)
+            if [ -z "$APK" ]; then echo "::error::APK not found"; ls -R _app/android/app/build/outputs/apk 2>&1 | head -30 || true; exit 1; fi
             echo "Installing: $APK"
             adb wait-for-device
             adb shell settings put global window_animation_scale 0 || true
