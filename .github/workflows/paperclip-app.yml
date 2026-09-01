@@ -91,6 +91,11 @@ jobs:
           curl -fsSL "https://raw.githubusercontent.com/nicoulaj/gradle-wrapper/refs/heads/main/gradlew" -o "$DST/gradlew" 2>/dev/null || true
           chmod +x "$DST/gradlew" 2>/dev/null || true
           echo "Wrapper jar: $(ls -lh "$WRAPPER_JAR" 2>/dev/null || echo 'missing')"
+          # Copy E2E test script
+          if [ -f "android-skeleton/ci_emulator_test.sh" ]; then
+            cp android-skeleton/ci_emulator_test.sh "$DST/"
+            chmod +x "$DST/ci_emulator_test.sh" 2>/dev/null || true
+          fi
           echo "Assets: $(du -sh "$DST/app/src/main/assets" | cut -f1) files=$(find "$DST/app/src/main/assets" -type f | wc -l)"
 
       # ── Build APK ─────────────────────────────────────────────
@@ -129,36 +134,29 @@ jobs:
           unzip -l "$APK" | grep -E "assets/index.html|classes|lib/" | head -20
           echo "DEX: $(unzip -l "$APK" | grep -c 'classes.*\.dex')"
 
-      # ── E2E Emulator ──────────────────────────────────────────
-      - name: Enable KVM
+      # ── E2E Emulator (from PocketDeploy reference) ────────────
+      - name: Enable KVM group perms for Hardware Acceleration
         run: |
+          echo "=== Setting up KVM hardware acceleration ==="
           sudo groupadd -r kvm 2>/dev/null || true
           sudo gpasswd -a $USER kvm 2>/dev/null || true
           sudo chown $USER /dev/kvm 2>/dev/null || sudo chmod 666 /dev/kvm 2>/dev/null || true
+          ls -la /dev/kvm || true
 
-      - name: E2E Emulator Test
+      - name: Real Android Emulator E2E (API 34 x86_64 + KVM Hardware Accel)
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
           target: google_apis
           arch: x86_64
           profile: pixel_5
-          emulator-options: -no-snapshot-load -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disk-size: 16384M
+          ram-size: 4096M
+          heap-size: 1024M
+          emulator-options: -no-snapshot-load -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -partition-size 16384
           disable-animations: true
           emulator-boot-timeout: 600
-          script: |
-            set -e
-            APK=$(find _paperclip/ui/android/app/build/outputs/apk -name "*.apk" -not -name "*unsigned*" | head -1)
-            [ -z "$APK" ] && APK=$(find _paperclip/ui/android/app/build/outputs/apk -name "*.apk" | head -1)
-            echo "Installing: $APK"
-            adb wait-for-device
-            adb shell settings put global window_animation_scale 0 || true
-            adb shell settings put global transition_animation_scale 0 || true
-            adb shell settings put global animator_duration_scale 0 || true
-            adb install -r "$APK"
-            adb shell am start -n com.paperclip.app/.MainActivity
-            for i in $(seq 1 20); do sleep 3; PID=$(adb shell pidof com.paperclip.app 2>/dev/null || echo ""); echo "PID=$PID tick=$i"; if [ -n "$PID" ]; then echo "Running!"; break; fi; done
-            adb logcat -d -s PaperclipMain:I PaperclipKA:I AndroidRuntime:E 2>/dev/null | tail -30 || true
+          script: bash android-skeleton/ci_emulator_test.sh
 
       # ── Upload + Release ──────────────────────────────────────
       - uses: actions/upload-artifact@v4
