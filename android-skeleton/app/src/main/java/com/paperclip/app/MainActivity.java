@@ -5,10 +5,12 @@ import android.os.Bundle;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
-import android.webkit.WebChromeClient;
+import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import androidx.webkit.WebViewAssetLoader;
+import androidx.webkit.WebViewAssetLoader.AssetsPathHandler;
 
 public class MainActivity extends Activity {
 
@@ -42,17 +44,24 @@ public class MainActivity extends Activity {
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         settings.setUserAgentString(settings.getUserAgentString() + " PaperclipApp/1.0");
 
-        // Handle page navigation
+        // WebViewAssetLoader maps https://appassets.androidstudio.net/ -> assets/
+        // This avoids CORS issues with file:// origin
+        final WebViewAssetLoader assetLoader = new WebViewAssetLoader.Builder()
+            .addPathHandler("/", new AssetsPathHandler(this))
+            .build();
+
         webView.setWebViewClient(new WebViewClient() {
             @Override
-            public boolean shouldOverrideUrlLoading(WebView view, String url) {
-                // Keep all navigation inside the WebView
-                view.loadUrl(url);
-                return true;
+            public WebResourceRequest shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                return request;
+            }
+
+            @Override
+            public WebResourceRequest shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                // Let WebViewAssetLoader handle asset URLs
+                return super.shouldOverrideUrlLoading(view, request);
             }
         });
-
-        webView.setWebChromeClient(new WebChromeClient());
 
         // Hide system UI
         webView.setSystemUiVisibility(
@@ -64,8 +73,8 @@ public class MainActivity extends Activity {
             | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
         );
 
-        // Load the Paperclip UI from assets
-        webView.loadUrl("file:///android_asset/index.html");
+        // Load via WebViewAssetLoader — serves assets over HTTPS, no CORS issues
+        webView.loadUrl("https://appassets.androidstudio.net/index.html");
     }
 
     @Override
