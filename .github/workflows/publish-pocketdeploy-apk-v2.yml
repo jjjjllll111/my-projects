@@ -1,0 +1,476 @@
+# Build PocketDeploy APK (bionic-native SEA) via my-projects runner
+# PocketDeploy — bionic-native APK (arm64-v8a, NDK→Bionic→SEA)
+# 全量原生: NDK/Bionic arm64 ELF node --SEA--> myapp + engine 闭包 + 预下载模型 -> APK
+# 更新策略: 不考虑增量更新, 更新=重新编译, 全部依赖与模型直接烘焙进产物
+# 链路: Node.js --(Android NDK)--> Bionic --(arm64-v8a)--> 原生 ELF node --(SEA/项目资源)--> myapp
+name: Build PocketDeploy APK v2 (9router+headroom+ORT, no llmlingua)
+
+on:
+  workflow_dispatch:
+    inputs:
+      pocketdeploy_ref:
+        description: PocketDeploy branch/ref to build
+        required: false
+        default: main
+      nine_router_ref:
+        description: Branch/ref of 9router-private to build
+        required: false
+        default: master
+      build_type:
+        description: debug or release
+        required: false
+        default: release
+      bake_models:
+        description: Bake llmlingua models (+~535MB) - v2 default false (headroom+9router+ORT only)
+        required: false
+        default: "false"
+      build_node_from_source:
+        description: Build Node.js from source via NDK (slow, else Termux prebuilt bionic ELF)
+        required: false
+        default: "false"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/publish-pocketdeploy-apk-v2.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pocketdeploy-apk-v2-${{ inputs.pocketdeploy_ref || 'main' }}
+  cancel-in-progress: false
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      NODE_OPTIONS: --max-old-space-size=8192
+      NEXT_TELEMETRY_DISABLED: "1"
+      NPM_CONFIG_AUDIT: "false"
+      NPM_CONFIG_FUND: "false"
+      NPM_CONFIG_LOGLEVEL: error
+    steps:
+      - name: Checkout PocketDeploy
+        uses: actions/checkout@v4
+        with:
+          repository: jjjjllll111/PocketDeploy
+          ref: ${{ inputs.pocketdeploy_ref || 'main' }}
+          token: ${{ secrets.GH_PAT }}
+          fetch-depth: 1
+
+      - name: Checkout 9router-private
+        uses: actions/checkout@v4
+        with:
+          repository: jjjjllll111/9router-private
+          ref: ${{ inputs.nine_router_ref || 'master' }}
+          token: ${{ secrets.GH_PAT }}
+          path: _9router
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: _9router/package-lock.json
+
+      - name: Setup JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK + platforms
+        run: |
+          set -euo pipefail
+          sdkmanager --install "ndk;29.0.14206865" "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+
+      - name: Install 9router deps
+        run: |
+          set -euo pipefail
+          cd _9router
+          npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+          (cd cli && npm install --no-audit --no-fund) || true
+
+      - name: Build 9router standalone
+        run: |
+          set -euo pipefail
+          cd _9router
+          npm run build
+          node scripts/copy-standalone-assets.mjs
+          test -f .next/standalone/server.js || test -f .next/standalone/custom-server.js || { echo "FATAL: standalone entry missing"; ls -R .next/standalone | head -40 || true; exit 1; }
+
+      - name: Bundle engine deps + models (strict, full bake)
+        run: |
+          set -euo pipefail
+          cd _9router
+          node scripts/bundle-engine-deps.mjs cli/app-engine-deps --strict
+          if [ -d cli/app-engine-deps/node_modules ]; then
+            mkdir -p cli/app/node_modules
+            cp -rn cli/app-engine-deps/node_modules/. cli/app/node_modules/ 2>/dev/null || cp -r cli/app-engine-deps/node_modules/. cli/app/node_modules/
+          fi
+          if [ "${{ inputs.bake_models }}" = "true" ]; then
+            echo "bake_models: preload llmlingua (strict, full offline)..."
+            node scripts/preload-engine-models.mjs cli/app-engine-models --strict
+            mkdir -p cli/app/engine-models
+            cp -rn cli/app-engine-models/. cli/app/engine-models/ 2>/dev/null || true
+            du -sh cli/app/engine-models || true
+          else
+            echo "v2: skip llmlingua engine-models bake (9router+headroom+ORT only)"
+            rm -rf cli/app/engine-models
+          fi
+          du -sh cli/app || true
+
+      - name: Optimize bundle (prune, strip glibc natives, seed ORT wasm)
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/optimize-bundle.mjs" <<'OPT_EOF'
+          #!/usr/bin/env node
+          import fs from "node:fs"; import path from "node:path"; import { execFileSync } from "node:child_process"; import { createRequire } from "node:module";
+          const APP = path.resolve(process.argv[2] || "_9router/cli/app");
+          const NM = path.join(APP, "node_modules"); const MODELS = path.join(APP, "engine-models");
+          const ENGINE_SPECS = ["omniglyph","omniglyph/applicability","@huggingface/transformers","@atjsh/llmlingua-2","js-tiktoken/lite","js-tiktoken/ranks/o200k_base","smol-toml","safe-regex","tls-client-node"];
+          const GLIBC_ONLY_PKGS = ["onnxruntime-node","sharp","@img"];
+          const JUNK_DIRS = new Set(["test","tests","__tests__","__mocks__","__fixtures__","coverage",".nyc_output",".github",".circleci",".git",".husky",".vscode",".idea",".cache","docs","doc","example","examples","samples","benchmark","benchmarks"]);
+          function fmtMiB(n){return (n/1024/1024).toFixed(1)+" MiB"}
+          function walkStats(root){let f=0,b=0;const s=[root];while(s.length){const d=s.pop();let e;try{e=fs.readdirSync(d,{withFileTypes:true})}catch{continue} for(const en of e){const p=path.join(d,en.name);if(en.isDirectory())s.push(p);else{f++;try{b+=fs.statSync(p).size}catch{}}}}return{files:f,bytes:b}}
+          function smoke(spec){try{execFileSync(process.execPath,["--no-warnings","-e","Promise.resolve().then(function(){return import(process.argv[1])}).then(function(){process.exit(0)},function(e){console.error(String((e&&e.message)||e));process.exit(1)})",spec],{cwd:APP,stdio:["ignore","pipe","pipe"],timeout:90000});return true}catch{return false}}
+          function smokeAll(){const o={};for(const s of ENGINE_SPECS)o[s]=smoke(s);return o}
+          const deleted={};function cnt(k){if(!deleted[k])deleted[k]={count:0,bytes:0};return deleted[k]} function rmP(k,p){let b=0;try{b=fs.statSync(p).size??0}catch{} fs.rmSync(p,{recursive:true,force:true});const c=cnt(k);c.count++;c.bytes+=b}
+          function junkKind(n){const l=n.toLowerCase();if(l.endsWith(".map"))return"sourcemap";if(l.endsWith(".d.ts")||l.endsWith(".d.mts")||l.endsWith(".d.cts"))return"typedef";if(l.endsWith(".md")||l.endsWith(".markdown"))return"docs";if(l.endsWith(".tsbuildinfo")||l.endsWith(".log")||l.endsWith(".tgz"))return"misc";if(n===".DS_Store"||n==="Thumbs.db")return"misc";return null}
+          function prune(){const s=[NM];while(s.length){const d=s.pop();let e;try{e=fs.readdirSync(d,{withFileTypes:true})}catch{continue} for(const en of e){const p=path.join(d,en.name);if(en.isDirectory()){if(JUNK_DIRS.has(en.name))rmP("junkdir",p);else s.push(p);continue}const k=junkKind(en.name);if(k)rmP(k,p)}}}
+          function strip(){for(const n of GLIBC_ONLY_PKGS){const p=path.join(NM,n);if(fs.existsSync(p)){console.log("strip(glibc): "+n);rmP("glibc-native",p)}}}
+          function stub(){const dir=path.join(NM,"onnxruntime-node");fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,"package.json"),JSON.stringify({name:"onnxruntime-node",version:"0.0.0-stub",type:"module",main:"index.js"}));fs.writeFileSync(path.join(dir,"index.js"),['// Android stub: onnxruntime-node -> onnxruntime-web WASM','import * as ort from "onnxruntime-web";','try{const w=ort.env&&ort.env.backends&&ort.env.backends.onnx&&ort.env.backends.onnx.wasm;if(w){w.wasmPaths=new URL("../onnxruntime-web/dist/",import.meta.url).href;w.numThreads=1}}catch(e){}','const Orig=ort.InferenceSession;const oc=Orig.create.bind(Orig);','async function cw(u,o={}){const eps=Array.isArray(o.executionProviders)&&o.executionProviders.length>0?o.executionProviders:["cpu"];if(!eps.includes("xnnpack"))o={...o,executionProviders:["xnnpack",...eps]};return oc(u,o)}','const S=class extends Orig{};S.create=cw;','export {S as InferenceSession};','export * from "onnxruntime-web";'].join("\n"));console.log("stub: onnxruntime-node -> ort-web WASM XNNPACK")}
+          function seed(){try{const v=JSON.parse(fs.readFileSync(path.join(NM,"onnxruntime-web","package.json"),"utf8"));const d=path.join(NM,"onnxruntime-web","dist");const cr=path.join(APP,"engine-models");if(!fs.existsSync(cr)){console.log("seed skipped: no engine-models");return} const rel=("https://cdn.jsdelivr.net/npm/onnxruntime-web@"+v.version+"/dist/").replace("https://","https:/");const dest=path.join(cr,rel);fs.mkdirSync(dest,{recursive:true});let n=0;for(const f of fs.readdirSync(d)){if(!/\.(wasm|mjs)$/.test(f))continue;fs.copyFileSync(path.join(d,f),path.join(dest,f));n++}console.log("seed-ort-wasm: "+n+" files @"+v.version)}catch(e){console.warn("seed fail: "+String((e&&e.message)||e))}}
+          if(!fs.existsSync(NM)){console.error("missing "+NM);process.exit(2)}
+          const bef=walkStats(APP); const bs=smokeAll(); prune(); strip(); stub(); seed();
+          const aft=walkStats(APP); const as=smokeAll();
+          const reg=ENGINE_SPECS.filter(s=>bs[s]&&!as[s]);
+          console.log("\n== optimize-bundle (bionic SEA) ==\nfiles: "+bef.files+" -> "+aft.files+"\nbytes: "+fmtMiB(bef.bytes)+" -> "+fmtMiB(aft.bytes));
+          for(const [k,v] of Object.entries(deleted))console.log("  "+k+": "+v.count+" ("+fmtMiB(v.bytes)+")");
+          console.log(ENGINE_SPECS.map(s=>s+": "+(bs[s]?"✅":"❌")+"->"+(as[s]?"✅":"❌")).join("\n"));
+          if(reg.length){console.error("BROKEN: "+reg.join(","));process.exit(3)}
+          OPT_EOF
+          OPT_STRIP_GLIBC_NATIVE=1 node "$RUNNER_TEMP/optimize-bundle.mjs" _9router/cli/app
+
+      - name: Sync 9router standalone -> android assets
+        run: |
+          set -euo pipefail
+          STANDALONE="_9router/.next/standalone"
+          ASSETS="android/app/src/main/assets/9router"
+          rm -rf "$ASSETS"; mkdir -p "$ASSETS"
+          cp -a "$STANDALONE"/. "$ASSETS"/
+          if [ -d "_9router/cli/app/node_modules" ]; then mkdir -p "$ASSETS/node_modules"; cp -rn _9router/cli/app/node_modules/. "$ASSETS/node_modules"/ 2>/dev/null || cp -r _9router/cli/app/node_modules/. "$ASSETS/node_modules"/; fi
+          if [ -d "_9router/cli/app/engine-models" ] && [ "${{ inputs.bake_models }}" = "true" ]; then mkdir -p "$ASSETS/engine-models"; cp -rn _9router/cli/app/engine-models/. "$ASSETS/engine-models"/ 2>/dev/null || true; else echo "v2: skip engine-models assets"; fi
+          echo "assets 9router: $(du -sh "$ASSETS" | cut -f1) files=$(find "$ASSETS" -type f | wc -l)"
+          test -f "$ASSETS/server.js" || test -f "$ASSETS/custom-server.js" || { echo "FATAL: 9router entry missing"; exit 1; }
+
+      - name: Extract bionic node closure (NDK/Bionic arm64 ELF — fast path)
+        if: inputs.build_node_from_source != 'true'
+        run: |
+          set -euo pipefail
+          TMP="$RUNNER_TEMP/termux-node"; rm -rf "$TMP"; mkdir -p "$TMP/nex" "$TMP/libs"
+          PKGINDEX="$TMP/Packages"
+          curl -fsSL https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages -o "$PKGINDEX"
+          pkg_file() { awk -v RS= -v FS='\n' -v pat="^Package: $1\$" '$1 ~ pat { for (i=1;i<=NF;i++) if ($i ~ /^Filename:/) { sub(/^Filename: /,"",$i); print $i; exit } }' "$PKGINDEX"; }
+          expand_deb() { local deb="$1" dest="$2"; local tmp; tmp=$(mktemp -d); (cd "$tmp" && ar x "$deb" && tar -xf data.tar.* -C "$dest"); rm -rf "$tmp"; }
+          NF=$(pkg_file nodejs); [ -z "$NF" ] && { echo "FATAL: nodejs not in Packages"; exit 1; }
+          curl -fsSL "https://packages.termux.dev/apt/termux-main/$NF" -o "$TMP/node.deb"
+          mkdir -p "$TMP/nex"; (cd "$TMP/nex" && ar x "$TMP/node.deb" && tar -xf data.tar.*)
+          NODE_BIN="$TMP/nex/data/data/com.termux/files/usr/bin/node"
+          test -x "$NODE_BIN" || { echo "FATAL: node missing"; exit 1; }
+          # Keep a copy for SEA injection as host ELF (still NDK/Bionic provenance)
+          mkdir -p "$RUNNER_TEMP/sea-host"
+          cp "$NODE_BIN" "$RUNNER_TEMP/sea-host/node-bionic"
+          chmod +x "$RUNNER_TEMP/sea-host/node-bionic"
+          file "$RUNNER_TEMP/sea-host/node-bionic"; readelf -h "$RUNNER_TEMP/sea-host/node-bionic" | head -20 || true
+          # Also produce legacy assets/node-bionic + node-libs for fallback
+          DEST="android/app/src/main/assets/node-bionic"; mkdir -p "$(dirname "$DEST")"; cp "$NODE_BIN" "$DEST"; chmod +x "$DEST"
+          DEPS="zlib c-ares libsqlite libffi openssl libicu libc++ libandroid-shmem libandroid-spawn jemalloc"
+          for pkg in $DEPS; do F=$(pkg_file "$pkg" || true); [ -z "$F" ] && { echo "::warning::pkg $pkg not found"; continue; }; echo "fetch $pkg -> $F"; curl -fsSL "https://packages.termux.dev/apt/termux-main/$F" -o "$TMP/$pkg.deb" || { echo "::warning::fetch $pkg failed"; continue; }; mkdir -p "$TMP/libs/$pkg"; expand_deb "$TMP/$pkg.deb" "$TMP/libs/$pkg"; done
+          AGG="$TMP/libs/_agg"; mkdir -p "$AGG"
+          find "$TMP/libs" -type f -name "*.so*" -not -path "*/_agg/*" | while read -r f; do cp -n "$f" "$AGG"/ 2>/dev/null || cp "$f" "$AGG"/; done
+          find "$TMP/nex" -type f -name "*.so*" | while read -r f; do cp -n "$f" "$AGG"/ 2>/dev/null || true; done
+          # Handle symlinked versioned libs (libicu.so -> libicu.so.78 etc)
+          find "$TMP/libs" "$TMP/nex" -type l -name "*.so*" 2>/dev/null | while read -r l; do t=$(readlink -f "$l" 2>/dev/null || readlink "$l" 2>/dev/null || true); [ -f "$t" ] && cp -n "$t" "$AGG/$(basename "$l")" 2>/dev/null || true; [ -f "$t" ] && cp -n "$t" "$AGG/$(basename "$t")" 2>/dev/null || true; done
+          echo "AGG libs:"; ls "$AGG" | tr ' ' '\n' | sort | head -40 || true
+          # Also copy libc++_shared.so explicitly (check both naming variants)
+          if ls "$AGG"/libc++* >/dev/null 2>&1; then for f in "$AGG"/libc++*; do echo "libc++ candidate: $(basename "$f") $(file "$f" | cut -d: -f2)"; done; fi
+          # Termux libc++ libs may live under usr/lib/aarch64-linux-android/ — re-collect
+          for d in "$TMP/libs/libc++" "$TMP/libs/libc++_29"; do [ -d "$d" ] || continue; find "$d" -type f -name "*.so*" 2>/dev/null | while read -r f; do echo "libc++ extra collect: $f"; cp -n "$f" "$AGG"/ 2>/dev/null || cp "$f" "$AGG"/; done; done
+          find "$TMP/libs" -path "*aarch64-linux-android*" -type f -name "*.so*" 2>/dev/null | while read -r f; do cp -n "$f" "$AGG/$(basename "$f")" 2>/dev/null || true; done
+          find "$TMP/libs" -path "*aarch64-linux-android*" -type l -name "*.so*" 2>/dev/null | while read -r l; do t=$(readlink -f "$l" 2>/dev/null || true); [ -f "$t" ] && cp -n "$t" "$AGG/$(basename "$l")" 2>/dev/null || true; done
+          # Ensure NEEDED name libc++_shared.so is satisfied (Termux may ship as libc++.so)
+          if [ ! -f "$AGG/libc++_shared.so" ]; then
+            for f in "$AGG"/libc*.so* "$AGG"/*c++*.so*; do [ -f "$f" ] || continue; if file "$f" 2>&1 | grep -qi "shared object"; then echo "mapping $(basename "$f") -> libc++_shared.so"; cp -a "$f" "$AGG/libc++_shared.so"; break; fi; done
+          fi
+          if [ ! -f "$AGG/libc++_shared.so" ] && ls "$TMP/libs/libc++"/data/data/com.termux/files/usr/lib/*.so* >/dev/null 2>&1; then cp -a "$TMP/libs/libc++"/data/data/com.termux/files/usr/lib/*.so* "$AGG"/ 2>/dev/null || true; fi
+          for so in $(readelf -d "$DEST" | grep -oP '(?<=Shared library: \[)[^\]]+'); do case "$so" in libc.so|libdl.so|libm.so) continue;; esac; if [ ! -f "$AGG/$so" ]; then echo "::warning::NEEDED $so MISSING in AGG: $so"; fi; done
+          ls "$AGG" | sort | tr ' ' '\n' | head -50 || true; echo "AGG has libc++: $(ls "$AGG" | grep -i c++ 2>&1 | head -n 10 || echo none)"
+          # Strip system-overlapping libraries that clash with Android's system linker/translation layer:
+          # (Android provides libc.so, libm.so, libdl.so natively — but libz.so.1, libcrypto.so.3, libssl.so.3 are specifically versioned sonames needed by Node ELF)
+          echo "Refining system libs in node-libs (keep versioned sonames libz.so.1, remove unversioned libc/libm/libdl)..."
+          rm -f "$AGG"/libc.so "$AGG"/libm.so "$AGG"/libdl.so || true
+          # Keep libz.so.1 for node ELF DT_NEEDED, remove unversioned libz.so to prevent translator clash
+          rm -f "$AGG"/libz.so || true
+          rm -f "$AGG"/libcrypto.so "$AGG"/libssl.so || true
+          test -f "$AGG/libz.so.1" || cp -a "$TMP/libs/zlib"/*libz.so.1* "$AGG/libz.so.1" 2>/dev/null || true
+          test -f "$AGG/libcrypto.so.3" || cp -a "$TMP/libs/openssl"/*libcrypto.so.3* "$AGG/libcrypto.so.3" 2>/dev/null || true
+          test -f "$AGG/libssl.so.3" || cp -a "$TMP/libs/openssl"/*libssl.so.3* "$AGG/libssl.so.3" 2>/dev/null || true
+          
+          mkdir -p android/app/src/main/assets/node-libs; cp -a "$AGG"/* android/app/src/main/assets/node-libs/ 2>/dev/null || true
+          echo "node-libs staged: $(ls android/app/src/main/assets/node-libs | wc -l) files -> $(du -sh android/app/src/main/assets/node-libs | cut -f1)"; ls android/app/src/main/assets/node-libs | grep -i "c++\|plus" | head -10 || echo "no c++ in node-libs"
+          readelf -d "$DEST" | grep NEEDED || true
+          mkdir -p "$RUNNER_TEMP/sea-libs"; cp -a "$AGG"/* "$RUNNER_TEMP/sea-libs"/ 2>/dev/null || true
+          echo "SEA host + libs ready: $(ls "$RUNNER_TEMP/sea-libs" | wc -l) libs"
+
+      - name: Strip native libs (llvm-strip --strip-all + patchelf)
+        run: |
+          set -euo pipefail
+          STRIP="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          test -x "$STRIP" || STRIP="llvm-strip"
+          echo "llvm-strip myapp + node-libs (Bionic, DT_NEEDED keep)"
+          "$STRIP" --strip-all --strip-unneeded --remove-section=.comment "$RUNNER_TEMP/sea-host/node-bionic" 2>&1 | head -20 || true
+          "$STRIP" --strip-all --strip-unneeded --remove-section=.comment android/app/src/main/assets/node-bionic 2>&1 | head -20 || true
+          for f in android/app/src/main/assets/node-libs/*.so*; do [ -f "$f" ] || continue; "$STRIP" --strip-all --strip-unneeded --remove-section=.comment "$f" 2>&1 | head -5 || true; done
+          for f in "$RUNNER_TEMP/sea-libs"/*.so*; do [ -f "$f" ] || continue; "$STRIP" --strip-all --strip-unneeded --remove-section=.comment "$f" 2>&1 | head -5 || true; done
+          if command -v patchelf >/dev/null 2>&1; then for f in android/app/src/main/assets/node-libs/*.so; do [ -f "$f" ] || continue; patchelf --remove-needed libandroid-shmem.so "$f" 2>&1 | head -5 || true; patchelf --remove-needed libandroid-spawn.so "$f" 2>&1 | head -5 || true; done; fi
+          readelf -d "$RUNNER_TEMP/sea-host/node-bionic" | grep NEEDED || true
+          ls -lh "$RUNNER_TEMP/sea-host/node-bionic" | head -5 || true
+          du -sh android/app/src/main/assets/node-libs 2>&1 | head -5 || true
+
+      - name: Build Node.js from source via NDK (slow, Bionic native)
+        if: inputs.build_node_from_source == 'true'
+        run: |
+          set -euo pipefail
+          NODE_VER="22.14.0"
+          NDK="$ANDROID_NDK_HOME"
+          TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          export CC="$TC/bin/aarch64-linux-android33-clang"
+          export CXX="$TC/bin/aarch64-linux-android33-clang++"
+          export AR="$TC/bin/llvm-ar"; export RANLIB="$TC/bin/llvm-ranlib"; export STRIP="$TC/bin/llvm-strip"
+          export CFLAGS="-O3 -flto=thin -march=armv8.2-a -Oz -g0 -DNDEBUG"
+          export CXXFLAGS="-O3 -flto=thin -march=armv8.2-a -Oz -g0 -DNDEBUG"
+          export LDFLAGS="-Wl,--gc-sections -Wl,--as-needed -Wl,--icf=all -Oz -flto=thin -Wl,--strip-all -Wl,--exclude-libs,ALL"
+          echo "NDK CC=$CC CFLAGS=$CFLAGS"
+          curl -fsSL "https://nodejs.org/dist/v$NODE_VER/node-v$NODE_VER.tar.gz" -o "$RUNNER_TEMP/node.tar.gz"
+          mkdir -p "$RUNNER_TEMP/node-src"; tar -xzf "$RUNNER_TEMP/node.tar.gz" -C "$RUNNER_TEMP/node-src" --strip-components=1
+          cd "$RUNNER_TEMP/node-src"
+          # Configure for Android Bionic arm64 — disable dTrace, inspector minimal, static openssl if needed
+          ./configure --dest-os=android --dest-cpu=arm64 --with-intl=full-icu --without-dtrace --experimental-sea-config 2>&1 | tail -30
+          make -j$(nproc) V= 2>&1 | tail -80
+          mkdir -p "$RUNNER_TEMP/sea-host"; cp out/Release/node "$RUNNER_TEMP/sea-host/node-bionic"; chmod +x "$RUNNER_TEMP/sea-host/node-bionic"
+          file "$RUNNER_TEMP/sea-host/node-bionic"; readelf -d "$RUNNER_TEMP/sea-host/node-bionic" | grep NEEDED || true
+          # Legacy fallback still needs node-libs; extract them from Termux for shared libs
+          echo "Node from source built via NDK -> Bionic"
+
+      - name: Cache SEA blob (Node 26, 9router hash)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/sea-prep.blob
+            ${{ runner.temp }}/myapp
+          key: sea-${{ hashFiles('_9router/.next/standalone/**/*.js', '_9router/.next/standalone/**/*.json') }}-node26-${{ hashFiles('_9router/package-lock.json') }}
+          restore-keys: |
+            sea-
+
+      - name: Generate SEA blob + inject into Bionic ELF -> myapp
+        run: |
+          set -euo pipefail
+          HOST_BIN="$RUNNER_TEMP/sea-host/node-bionic"
+          test -x "$HOST_BIN" || { echo "FATAL: sea host missing"; ls -R "$RUNNER_TEMP" | head -50 || true; exit 1; }
+          file "$HOST_BIN"; readelf -h "$HOST_BIN" | grep -q "AArch64" || echo "::warning::host not AArch64"
+          if readelf -d "$HOST_BIN" | grep -Eq "libc\.so\.6|GLIBC_"; then echo "FATAL: host is glibc, not bionic"; exit 1; fi
+          echo "NEEDED host:"; readelf -d "$HOST_BIN" | grep NEEDED || true
+
+          # SEA entry: minimal bootstrap — CJS (mksnapshot requires CJS, not ESM)
+          WORK="_9router/cli/app"
+          cat > "$RUNNER_TEMP/sea-entry.js" <<'SEA_ENTRY'
+          // SEA CJS bootstrap — loads baked 9router at workDir custom-server.js/server.js
+          const fs = require("node:fs"); const path = require("node:path");
+          const candidates = ["./custom-server.js","./server.js","./9router/custom-server.js","./9router/server.js"];
+          let entry=null; for(const c of candidates){ try{ const p=path.resolve(c); if(fs.existsSync(p)){entry=p;break} }catch{} }
+          if(!entry){ console.error("SEA: no entry found", candidates.join(",")); process.exit(1) }
+          console.log("SEA myapp ->", entry, "execPath=", process.execPath);
+          require(entry);
+          SEA_ENTRY
+          cat "$RUNNER_TEMP/sea-entry.js"
+
+          if [ "${{ inputs.build_type }}" = "release" ]; then
+            USE_SNAPSHOT="false"; USE_CODECACHE="true"
+          else
+            USE_SNAPSHOT="false"; USE_CODECACHE="false"
+          fi
+          cat > "$RUNNER_TEMP/sea-config.json" <<SEA_JSON
+          {
+            "main": "$RUNNER_TEMP/sea-entry.js",
+            "output": "$RUNNER_TEMP/sea-prep.blob",
+            "disableExperimentalSEAWarning": true,
+            "useSnapshot": $USE_SNAPSHOT,
+            "useCodeCache": $USE_CODECACHE
+          }
+          SEA_JSON
+          echo "SEA snapshot=$USE_SNAPSHOT codeCache=$USE_CODECACHE (release codeCache only)"
+          cat "$RUNNER_TEMP/sea-config.json"
+
+          # Generate blob via host node (x86 host node generates blob, injected into arm64 host)
+          node --experimental-sea-config "$RUNNER_TEMP/sea-config.json"
+          ls -lh "$RUNNER_TEMP/sea-prep.blob"
+          test -s "$RUNNER_TEMP/sea-prep.blob" || { echo "FATAL: blob empty"; exit 1; }
+
+          # Inject blob into Bionic ARM64 ELF via postject (sentinel fuse per Node SEA docs)
+          npm install --no-save postject 2>&1 | tail -5
+          cp "$HOST_BIN" "$RUNNER_TEMP/myapp"
+          chmod +x "$RUNNER_TEMP/myapp"
+          npx postject "$RUNNER_TEMP/myapp" NODE_SEA_BLOB "$RUNNER_TEMP/sea-prep.blob" --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
+          echo "postject injected"
+          file "$RUNNER_TEMP/myapp"
+          ls -lh "$RUNNER_TEMP/myapp"
+          readelf -d "$RUNNER_TEMP/myapp" | grep NEEDED || true
+
+          # Stage for APK: both assets/myapp (x86_64 emulator fallback) + jniLibs/arm64-v8a/libmyapp.so (arm64 W^X) - jniLibs filtered on x86_64
+          mkdir -p android/app/src/main/assets
+          cp "$RUNNER_TEMP/myapp" android/app/src/main/assets/myapp
+          chmod +x android/app/src/main/assets/myapp
+          mkdir -p android/app/src/main/jniLibs/arm64-v8a
+          cp "$RUNNER_TEMP/myapp" android/app/src/main/jniLibs/arm64-v8a/libmyapp.so
+          # Also stage node-libs for LD_LIBRARY_PATH (myapp NEEDED .so deps)
+          if [ -d "$RUNNER_TEMP/sea-libs" ]; then
+            mkdir -p android/app/src/main/assets/node-libs
+            cp -n "$RUNNER_TEMP/sea-libs"/* android/app/src/main/assets/node-libs/ 2>/dev/null || true
+          fi
+          echo "myapp staged: assets/myapp + jniLibs/libmyapp.so $(du -sh android/app/src/main/jniLibs/arm64-v8a/libmyapp.so | cut -f1)"
+
+      - name: Bundle headroom (proxy+code + Kompress-v2 ml model, latest, baked offline)
+        run: |
+          set -euo pipefail
+          # headroom proxy+code: always latest, baked wheels + pre-downloaded hf model
+          python3 -m pip install -U pip wheel --quiet
+          python3 -m pip wheel --no-cache-dir --only-binary=:all: -w "$RUNNER_TEMP/headroom-wheels" "headroom-ai[proxy,code]" 2>&1 | tail -20
+          ls -lh "$RUNNER_TEMP/headroom-wheels" | head -30 || true
+          echo "headroom wheels: $(ls "$RUNNER_TEMP/headroom-wheels" | wc -l) files"
+          # v2: headroom wheels only (no Kompress model), ORT wasm already seeded via Optimize bundle
+          # Stage for APK: assets/headroom/wheels only
+          ASSET_HR="android/app/src/main/assets/headroom"
+          rm -rf "$ASSET_HR"; mkdir -p "$ASSET_HR/wheels"
+          cp -a "$RUNNER_TEMP/headroom-wheels"/* "$ASSET_HR/wheels"/ 2>/dev/null || true
+          echo "headroom staged v2: wheels=$(du -sh "$ASSET_HR/wheels" | cut -f1) total=$(du -sh "$ASSET_HR" | cut -f1) files=$(find "$ASSET_HR" -type f | wc -l)"
+          ls "$ASSET_HR/wheels" | wc -l || true
+
+      - name: Bundle python Bionic closure for Headroom (self-contained, no system python)
+        run: |
+          set -euo pipefail
+          echo "=== Bundling Termux python Bionic closure for Headroom ==="
+          PY_TMP="$RUNNER_TEMP/termux-python-headroom"; rm -rf "$PY_TMP"; mkdir -p "$PY_TMP/agg"
+          PKGINDEX="$PY_TMP/Packages"
+          curl -fsSL https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages -o "$PKGINDEX"
+          py_pkg_file() { awk -v RS= -v FS='\n' -v pat="^Package: $1\$" '$1 ~ pat { for(i=1;i<=NF;i++) if($i ~ /^Filename:/){ sub(/^Filename: /,"",$i); print $i; exit } }' "$PKGINDEX"; }
+          py_expand_deb() { local deb="$1" dest="$2"; local tmp; tmp=$(mktemp -d); (cd "$tmp" && ar x "$deb" && tar -xf data.tar.* -C "$dest"); rm -rf "$tmp"; }
+          for pkg in python libpython openssl libffi readline libsqlite zlib libicu libc++ libandroid-shmem; do F=$(py_pkg_file "$pkg" || true); [ -z "$F" ] && { echo "::warning::python pkg $pkg not found"; continue; }; echo "fetch python-dep $pkg -> $F"; curl -fsSL "https://packages.termux.dev/apt/termux-main/$F" -o "$PY_TMP/$pkg.deb" || { echo "::warning::fetch $pkg failed"; continue; }; mkdir -p "$PY_TMP/libs/$pkg"; py_expand_deb "$PY_TMP/$pkg.deb" "$PY_TMP/libs/$pkg"; done
+          PY_DEST="android/app/src/main/assets/headroom/python"; rm -rf "$PY_DEST"; mkdir -p "$PY_DEST"
+          if [ -d "$PY_TMP/libs/python/data/data/com.termux/files/usr" ]; then cp -a "$PY_TMP/libs/python/data/data/com.termux/files/usr/." "$PY_DEST"/; echo "python usr staged"; fi
+          for d in "$PY_TMP/libs"/*; do [ -d "$d" ] || continue; find "$d" -type f -name "*.so*" | while read -r so; do cp -n "$so" "$PY_DEST/lib"/ 2>/dev/null || (mkdir -p "$PY_DEST/lib" && cp -n "$so" "$PY_DEST/lib"/); done; done
+          find "$PY_DEST" -type f -name "python3*" | xargs chmod +x 2>/dev/null || true
+          echo "python closure staged: $(du -sh "$PY_DEST" | cut -f1) files=$(find "$PY_DEST" -type f | wc -l)"
+          ls "$PY_DEST/bin" 2>/dev/null | head -20 || echo "no bin"; ls "$PY_DEST/lib" 2>/dev/null | head -20 || true
+
+      - name: Verify APK pre-flight (STRICT SEA — fail fast, no fallback)
+        run: |
+          set -euo pipefail
+          echo "=== assets/jniLibs preview ==="; ls -lh android/app/src/main/assets/ 2>&1 | head -30 || true; ls android/app/src/main/assets/node-libs 2>&1 | head -20 || true; ls -lh android/app/src/main/jniLibs/arm64-v8a/ 2>&1 | head -20 || true; echo "--- du ---"; du -sh android/app/src/main/assets/9router 2>&1 | head -5 || true; du -sh android/app/src/main/assets/node-libs 2>&1 | head -5 || true; du -sh android/app/src/main/jniLibs 2>&1 | head -5 || true; du -sh android/app/src/main/assets 2>&1 | head -5 || true
+          test -f android/app/src/main/jniLibs/arm64-v8a/libmyapp.so || { echo "::error::STRICT: jniLibs libmyapp.so missing (SEA build failed)"; exit 1; }
+          file android/app/src/main/jniLibs/arm64-v8a/libmyapp.so 2>&1 | head -5 || true
+          # Ensure SEA is AArch64 ELF
+          if ! file android/app/src/main/jniLibs/arm64-v8a/libmyapp.so | grep -qi "aarch64"; then echo "::error::myapp is not AArch64 ELF"; exit 1; fi
+
+      - name: Build APK (Gradle)
+        run: |
+          set -euo pipefail
+          cd android
+          chmod +x gradlew
+          if [ "${{ inputs.build_type }}" = "release" ]; then
+            ./gradlew :app:assembleRelease --stacktrace
+            APK="app/build/outputs/apk/release/app-release-unsigned.apk"
+            # Auto-sign release APK with debug keystore for CI testing & immediate adb install
+            KEYSTORE="$RUNNER_TEMP/ci-release.keystore"
+            keytool -genkeypair -v -keystore "$KEYSTORE" -alias pocketdeploy -keyalg RSA -keysize 2048 -validity 10000 -storepass pocketdeploy -keypass pocketdeploy -dname "CN=PocketDeploy, OU=CI, O=PocketDeploy, L=Local, ST=Local, C=CN"
+            SIGNED_APK="app/build/outputs/apk/release/app-release-signed.apk"
+            APK_SIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+            test -x "$APK_SIGNER" || APK_SIGNER="$ANDROID_HOME/build-tools/34.0.0/apksigner"
+            test -x "$APK_SIGNER" || APK_SIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | head -1)"
+            "$APK_SIGNER" sign --ks "$KEYSTORE" --ks-pass pass:pocketdeploy --key-pass pass:pocketdeploy --out "$SIGNED_APK" "$APK"
+            APK="$SIGNED_APK"
+          else
+            ./gradlew :app:assembleDebug --stacktrace
+            APK="app/build/outputs/apk/debug/app-debug.apk"
+          fi
+          echo "APK=$APK" >> "$GITHUB_ENV"
+          ls -lh "$APK"; du -sh "$APK"
+
+      - name: Enable KVM group perms for Hardware Acceleration
+        run: |
+          echo "=== Setting up KVM hardware acceleration ==="
+          sudo groupadd -r kvm 2>/dev/null || true
+          sudo gpasswd -a $USER kvm 2>/dev/null || true
+          sudo chown $USER /dev/kvm 2>/dev/null || sudo chmod 666 /dev/kvm 2>/dev/null || true
+          ls -la /dev/kvm || true
+
+      - name: Real Android Emulator E2E (API 34/35 x86_64 + KVM Hardware Accel) & Port Validation
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_5
+          disk-size: 16384M
+          ram-size: 4096M
+          heap-size: 1024M
+          emulator-options: -no-snapshot-load -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -partition-size 16384
+          disable-animations: true
+          emulator-boot-timeout: 600
+          script: bash android/ci_emulator_test.sh
+
+      - name: Build AAB (Bundletool, release only)
+        if: inputs.build_type == 'release'
+        run: |
+          set -euo pipefail
+          cd android
+          ./gradlew :app:bundleRelease --stacktrace
+          AAB="app/build/outputs/bundle/release/app-release.aab"
+          echo "AAB=$AAB" >> "$GITHUB_ENV"
+          ls -lh "$AAB"; du -sh "$AAB"
+          # Bundletool optimized APKS (arm64-v8a single split) — dry-run size check
+          if command -v bundletool >/dev/null 2>&1; then
+            bundletool build-apks --bundle="$AAB" --output=/tmp/app.apks --overwrite --local-testing --ks=~/.android/debug.keystore 2>&1 | head -20 || true
+            bundletool get-size total --apks=/tmp/app.apks 2>&1 | head -20 || true
+          fi
+
+      - name: Verify APK (STRICT SEA — no node-bionic fallback)
+        run: |
+          set -euo pipefail
+          APK="android/${{ env.APK }}"
+          echo "=== APK contents (assets/jniLibs) ==="
+          (unzip -l "$APK" | grep -E "assets/9router|assets/headroom|assets/node-libs|lib/arm64-v8a/libmyapp|classes" | head -80 || true)
+          if ! unzip -l "$APK" | grep -q "lib/arm64-v8a/libmyapp.so"; then echo "::error::STRICT: lib/arm64-v8a/libmyapp.so missing in APK (SEA injection failed)"; exit 1; fi
+          if unzip -l "$APK" | grep -q "assets/node-bionic"; then echo "::notice::legacy assets/node-bionic still in APK (ignored at runtime)"; fi
+          if ! unzip -l "$APK" | grep -q "assets/9router/server.js\|assets/9router/custom-server.js"; then echo "::error::assets/9router entry missing"; exit 1; fi
+          if [ "${{ inputs.bake_models }}" = "true" ] && ! unzip -l "$APK" | grep -q "assets/9router/engine-models"; then echo "::error::STRICT: engine-models not baked (offline llmlingua missing)"; exit 1; else echo "v2: engine-models check skipped or present"; fi
+          if unzip -p "$APK" "lib/arm64-v8a/libmyapp.so" > /tmp/_apk_myapp 2>/dev/null && [ -s /tmp/_apk_myapp ]; then echo "myapp in APK:"; file /tmp/_apk_myapp | head -5 || true; readelf -h /tmp/_apk_myapp 2>&1 | head -10 || true; if ! file /tmp/_apk_myapp | grep -qi "aarch64"; then echo "::error::myapp in APK is not AArch64 ELF"; exit 1; fi; fi
+          du -sh "$APK"
+          if [ -n "${{ env.AAB }}" ]; then echo "AAB: $AAB"; ls -lh "$AAB" 2>&1 | head -5 || true; du -sh "$AAB" 2>&1 | head -5 || true; fi
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PocketDeploy-${{ inputs.build_type || 'debug' }}-apk-SEA
+          path: android/${{ env.APK }}
+          if-no-files-found: error
+          retention-days: 30
+
+
