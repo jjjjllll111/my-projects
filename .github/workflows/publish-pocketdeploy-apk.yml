@@ -73,15 +73,15 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 26
           cache: npm
           cache-dependency-path: _9router/package-lock.json
 
-      - name: Setup JDK 17
+      - name: Setup JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
           cache: gradle
 
       - name: Setup Android SDK
@@ -256,6 +256,16 @@ jobs:
           file "$RUNNER_TEMP/sea-host/node-bionic"; readelf -d "$RUNNER_TEMP/sea-host/node-bionic" | grep NEEDED || true
           # Legacy fallback still needs node-libs; extract them from Termux for shared libs
           echo "Node from source built via NDK -> Bionic"
+
+      - name: Cache SEA blob (Node 26, 9router hash)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/sea-prep.blob
+            ${{ runner.temp }}/myapp
+          key: sea-${{ hashFiles('_9router/.next/standalone/**/*.js', '_9router/.next/standalone/**/*.json') }}-node26-${{ hashFiles('_9router/package-lock.json') }}
+          restore-keys: |
+            sea-
 
       - name: Generate SEA blob + inject into Bionic ELF -> myapp
         run: |
