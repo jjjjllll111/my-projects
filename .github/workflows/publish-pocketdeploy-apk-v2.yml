@@ -258,50 +258,33 @@ jobs:
           mkdir -p "$RUNNER_TEMP/sea-libs"; cp -a "$AGG"/* "$RUNNER_TEMP/sea-libs"/ 2>/dev/null || true
           echo "SEA host + libs ready: $(ls "$RUNNER_TEMP/sea-libs" | wc -l) libs"
 
-      - name: Normalize ELF DT_NEEDED sonames with patchelf & llvm-strip
+            - name: Stage clean Bionic Node runtime assets & native libraries
         run: |
           set -euo pipefail
-          sudo apt-get update -qq && sudo apt-get install -y -qq patchelf
           STRIP="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
           test -x "$STRIP" || STRIP="llvm-strip"
 
-          JNI="android/app/src/main/jniLibs/arm64-v8a"
-          mkdir -p "$JNI"
+          # 1. Stage original untouched node-libs to assets/node-libs (extracted to filesDir at runtime)
+          mkdir -p android/app/src/main/assets/node-libs
+          cp -a "$RUNNER_TEMP/termux-node/libs/_agg"/* android/app/src/main/assets/node-libs/ 2>/dev/null || true
+          
+          # 2. Stage node-bionic executable to assets/node-bionic
+          cp -a "$RUNNER_TEMP/sea-host/node-bionic" android/app/src/main/assets/node-bionic
+          chmod +x android/app/src/main/assets/node-bionic
 
-          # Copy everything from AGG to JNI
-          cp -a "$RUNNER_TEMP/termux-node/libs/_agg"/* "$JNI"/ 2>/dev/null || true
-          cp -a "$RUNNER_TEMP/sea-host/node-bionic" "$JNI"/libnode.so 2>/dev/null || true
-          cp -a "$RUNNER_TEMP/sea-host/node-bionic" "$JNI"/libnode_bin.so 2>/dev/null || true
+          # 3. Also copy to jniLibs/arm64-v8a as standard fallback
+          mkdir -p android/app/src/main/jniLibs/arm64-v8a
+          cp -a "$RUNNER_TEMP/termux-node/libs/_agg"/* android/app/src/main/jniLibs/arm64-v8a/ 2>/dev/null || true
+          cp -a "$RUNNER_TEMP/sea-host/node-bionic" android/app/src/main/jniLibs/arm64-v8a/libnode_bin.so 2>/dev/null || true
 
-          cd "$JNI"
-
-          # 1. Create unversioned copies for versioned sonames so AGP packages all of them
-          [ -f libz.so.1 ] && cp -a libz.so.1 libz.so || true
-          [ -f libcrypto.so.3 ] && cp -a libcrypto.so.3 libcrypto.so || true
-          [ -f libssl.so.3 ] && cp -a libssl.so.3 libssl.so || true
-          [ -f libsqlite3.so.0 ] && cp -a libsqlite3.so.0 libsqlite3.so || true
-          [ -f libicui18n.so.78 ] && cp -a libicui18n.so.78 libicui18n.so || true
-          [ -f libicuuc.so.78 ] && cp -a libicuuc.so.78 libicuuc.so || true
-          [ -f libicudata.so.78 ] && cp -a libicudata.so.78 libicudata.so || true
-
-          # 2. Patch every ELF to replace versioned DT_NEEDED with clean unversioned names & set RPATH to $ORIGIN
-          for elf in $(find . -maxdepth 1 -name "*.so" -o -name "node*"); do
-            [ -f "$elf" ] || continue
-            file "$elf" | grep -qi "ELF" || continue
-            echo "Processing $elf..."
-            patchelf --replace-needed libz.so.1 libz.so "$elf" 2>/dev/null || true
-            patchelf --replace-needed libcrypto.so.3 libcrypto.so "$elf" 2>/dev/null || true
-            patchelf --replace-needed libssl.so.3 libssl.so "$elf" 2>/dev/null || true
-            patchelf --replace-needed libicui18n.so.78 libicui18n.so "$elf" 2>/dev/null || true
-            patchelf --replace-needed libicuuc.so.78 libicuuc.so "$elf" 2>/dev/null || true
-            patchelf --replace-needed libicudata.so.78 libicudata.so "$elf" 2>/dev/null || true
-            patchelf --set-rpath '$ORIGIN' "$elf" 2>/dev/null || true
-            "$STRIP" --strip-all --strip-unneeded --remove-section=.comment "$elf" 2>/dev/null || true
+          # 4. Light strip comments only (do NOT touch DT_NEEDED or DT_VERNEED)
+          "$STRIP" --strip-unneeded --remove-section=.comment android/app/src/main/assets/node-bionic 2>/dev/null || true
+          for f in android/app/src/main/assets/node-libs/*.so*; do
+            [ -f "$f" ] && "$STRIP" --strip-unneeded --remove-section=.comment "$f" 2>/dev/null || true
           done
 
-          echo "=== Verification of libnode.so dependencies ==="
-          patchelf --print-needed libnode.so || readelf -d libnode.so | grep NEEDED || true
-          cd - >/dev/null
+          echo "=== Staged clean assets/node-libs ($(ls android/app/src/main/assets/node-libs | wc -l) files) ==="
+          ls -la android/app/src/main/assets/node-libs | head -n 30
 
       - name: Build Node.js from source via NDK (slow, Bionic native)
         if: inputs.build_node_from_source == 'true'
