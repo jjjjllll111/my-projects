@@ -231,6 +231,9 @@ jobs:
 
           cp "$RUNNER_TEMP/myapp" "$DEST/myapp-dir/myapp"
           chmod +x "$DEST/myapp-dir/myapp"
+          # Also stage to jniLibs for nativeLibraryDir exec (vivo noexec on filesDir)
+          mkdir -p _app/android/app/src/main/jniLibs/arm64-v8a
+          cp "$RUNNER_TEMP/myapp" _app/android/app/src/main/jniLibs/arm64-v8a/libmyapp.so
           cp "$RUNNER_TEMP/server.js" "$DEST/myapp-dir/"
           cp -a _paperclip/ui/dist "$DEST/myapp-dir/ui-dist"
           cp -a "$RUNNER_TEMP/termux-libs"/* "$DEST/node-libs/" 2>/dev/null || true
