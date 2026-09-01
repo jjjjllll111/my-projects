@@ -25,7 +25,7 @@ on:
     branches: [main]
     paths: [".github/workflows/paperclip-app.yml"]
 
-permissions: { contents: read }
+permissions: { contents: write }
 concurrency:
   group: paperclip-apk-${{ inputs.paperclip_app_ref || 'main' }}
   cancel-in-progress: true
