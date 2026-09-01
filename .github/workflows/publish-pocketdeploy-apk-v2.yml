@@ -244,9 +244,9 @@ jobs:
           # Also promote critical NEEDED .so to jniLibs so PackageManager extracts them to nativeLibraryDir (linker path)
           # This makes libz.so.1 / libcrypto.so.3 / libc++_shared.so visible even if filesDir extraction is delayed/blocked
           mkdir -p android/app/src/main/jniLibs/arm64-v8a
-          for so in libc++_shared.so libz.so.1 libcrypto.so.3 libssl.so.3 libcares.so libsqlite3.so libffi.so libicui18n.so.78 libicuuc.so.78 libicudata.so.78; do
-            if [ -f "$AGG/$so" ]; then cp -a "$AGG/$so" android/app/src/main/jniLibs/arm64-v8a/ 2>/dev/null || true; echo "jniLibs prom: $so"; fi
-          done
+          # Copy ALL Bionic native dependency libraries to jniLibs so Android extracts them with full exec permissions
+          cp -a "$AGG"/* android/app/src/main/jniLibs/arm64-v8a/ 2>/dev/null || true
+          echo "All native dependency libs promoted to jniLibs: $(ls android/app/src/main/jniLibs/arm64-v8a | wc -l) files" 
           # Also handle versioned sonames that may be named libz.so.1.3.2 etc -> already in AGG as libz.so.1 copy
           ls android/app/src/main/jniLibs/arm64-v8a/ 2>&1 | head -n 20 || true
           echo "node-libs staged: $(ls android/app/src/main/assets/node-libs | wc -l) files -> $(du -sh android/app/src/main/assets/node-libs | cut -f1)"; ls android/app/src/main/assets/node-libs | grep -i "c++\|plus" | head -10 || echo "no c++ in node-libs"
