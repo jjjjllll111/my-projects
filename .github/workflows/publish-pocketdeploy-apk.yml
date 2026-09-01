@@ -165,6 +165,8 @@ jobs:
           ASSETS="android/app/src/main/assets/9router"
           rm -rf "$ASSETS"; mkdir -p "$ASSETS"
           cp -a "$STANDALONE"/. "$ASSETS"/
+          if [ -d "_9router/cli/app/node_modules" ]; then mkdir -p "$ASSETS/node_modules"; cp -rn _9router/cli/app/node_modules/. "$ASSETS/node_modules"/ 2>/dev/null || cp -r _9router/cli/app/node_modules/. "$ASSETS/node_modules"/; fi
+          if [ -d "_9router/cli/app/engine-models" ]; then mkdir -p "$ASSETS/engine-models"; cp -rn _9router/cli/app/engine-models/. "$ASSETS/engine-models"/ 2>/dev/null || true; fi
           echo "assets 9router: $(du -sh "$ASSETS" | cut -f1) files=$(find "$ASSETS" -type f | wc -l)"
           test -f "$ASSETS/server.js" || test -f "$ASSETS/custom-server.js" || { echo "FATAL: 9router entry missing"; exit 1; }
 
