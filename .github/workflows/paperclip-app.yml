@@ -71,7 +71,7 @@ jobs:
         with: { version: 9, run_install: false }
 
       - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: "21" }
+        with: { distribution: temurin, java-version: "25" }
 
       - uses: android-actions/setup-android@v3
 
