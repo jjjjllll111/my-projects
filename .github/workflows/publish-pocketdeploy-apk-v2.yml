@@ -408,16 +408,16 @@ jobs:
       - name: Build APK (Gradle)
         run: |
           set -euo pipefail
-          GRADLE_APP_ARGS=""
-          if [ -n "${{ inputs.app_id }}" ]; then GRADLE_APP_ARGS="$GRADLE_APP_ARGS -PAPP_ID=${{ inputs.app_id }}"; echo "APP_ID=${{ inputs.app_id }}"; fi
-          if [ -n "${{ inputs.app_name }}" ]; then GRADLE_APP_ARGS="$GRADLE_APP_ARGS -PAPP_NAME=${{ inputs.app_name }}"; fi
-          if [ -n "${{ inputs.app_version_name }}" ]; then GRADLE_APP_ARGS="$GRADLE_APP_ARGS -PAPP_VERSION_NAME=${{ inputs.app_version_name }}"; fi
-          if [ -n "${{ inputs.app_version_code }}" ]; then GRADLE_APP_ARGS="$GRADLE_APP_ARGS -PAPP_VERSION_CODE=${{ inputs.app_version_code }}"; fi
-          echo "GRADLE_APP_ARGS=$GRADLE_APP_ARGS"
+          GRADLE_APP_ARGS=()
+          if [ -n "${{ inputs.app_id }}" ]; then GRADLE_APP_ARGS+=("-PAPP_ID=${{ inputs.app_id }}"); echo "APP_ID=${{ inputs.app_id }}"; fi
+          if [ -n "${{ inputs.app_name }}" ]; then GRADLE_APP_ARGS+=("-PAPP_NAME=${{ inputs.app_name }}"); fi
+          if [ -n "${{ inputs.app_version_name }}" ]; then GRADLE_APP_ARGS+=("-PAPP_VERSION_NAME=${{ inputs.app_version_name }}"); fi
+          if [ -n "${{ inputs.app_version_code }}" ]; then GRADLE_APP_ARGS+=("-PAPP_VERSION_CODE=${{ inputs.app_version_code }}"); fi
+          echo "GRADLE_APP_ARGS=${GRADLE_APP_ARGS[*]}"
           cd android
           chmod +x gradlew
           if [ "${{ inputs.build_type }}" = "release" ]; then
-            ./gradlew :app:assembleRelease --stacktrace $GRADLE_APP_ARGS
+            ./gradlew :app:assembleRelease --stacktrace "${GRADLE_APP_ARGS[@]}"
             APK="app/build/outputs/apk/release/app-release-unsigned.apk"
             # Auto-sign release APK with debug keystore for CI testing & immediate adb install
             KEYSTORE="$RUNNER_TEMP/ci-release.keystore"
@@ -429,7 +429,7 @@ jobs:
             "$APK_SIGNER" sign --ks "$KEYSTORE" --ks-pass pass:pocketdeploy --key-pass pass:pocketdeploy --out "$SIGNED_APK" "$APK"
             APK="$SIGNED_APK"
           else
-            ./gradlew :app:assembleDebug --stacktrace $GRADLE_APP_ARGS
+            ./gradlew :app:assembleDebug --stacktrace "${GRADLE_APP_ARGS[@]}"
             APK="app/build/outputs/apk/debug/app-debug.apk"
           fi
           echo "APK=$APK" >> "$GITHUB_ENV"
@@ -440,7 +440,7 @@ jobs:
         run: |
           set -euo pipefail
           cd android
-          ./gradlew :app:bundleRelease --stacktrace $GRADLE_APP_ARGS
+          ./gradlew :app:bundleRelease --stacktrace "${GRADLE_APP_ARGS[@]}"
           AAB="app/build/outputs/bundle/release/app-release.aab"
           echo "AAB=$AAB" >> "$GITHUB_ENV"
           ls -lh "$AAB"; du -sh "$AAB"
