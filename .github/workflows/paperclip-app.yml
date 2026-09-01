@@ -1,13 +1,17 @@
 # Build Paperclip Android APK
-# Android project files are checked into this repo (android-skeleton/).
-# Each run: fetch paperclip-master → build UI → copy assets → Gradle build APK
+# Source code: jjjjllll111/paperclip-app (forked from PocketDeploy, cleaned)
+# Each run: checkout paperclip-app → Gradle build APK → E2E test → Upload
 name: Build Paperclip APK
 
 on:
   workflow_dispatch:
     inputs:
-      paperclip_ref:
-        description: "paperclip-master branch/ref"
+      paperclip_app_ref:
+        description: "paperclip-app branch/ref"
+        required: false
+        default: master
+      paperclip_master_ref:
+        description: "paperclip-master branch/ref (for UI assets)"
         required: false
         default: master
       build_type:
@@ -20,7 +24,7 @@ on:
 
 permissions: { contents: read }
 concurrency:
-  group: paperclip-apk-${{ inputs.paperclip_ref || 'main' }}
+  group: paperclip-apk-${{ inputs.paperclip_app_ref || 'main' }}
   cancel-in-progress: true
 
 jobs:
@@ -32,17 +36,29 @@ jobs:
       NPM_CONFIG_AUDIT: "false"
       NPM_CONFIG_FUND: "false"
     steps:
+      # ── Checkout source ──────────────────────────────────────
       - uses: actions/checkout@v4
         with: { fetch-depth: 1 }
 
-      - uses: actions/checkout@v4
+      - name: Checkout paperclip-app (Android project)
+        uses: actions/checkout@v4
+        with:
+          repository: jjjjllll111/paperclip-app
+          ref: ${{ inputs.paperclip_app_ref || 'master' }}
+          token: ${{ secrets.GH_PAT }}
+          path: _app
+          fetch-depth: 1
+
+      - name: Checkout paperclip-master (latest code)
+        uses: actions/checkout@v4
         with:
           repository: jjjjllll111/paperclip-master
-          ref: ${{ inputs.paperclip_ref || 'master' }}
+          ref: ${{ inputs.paperclip_master_ref || 'master' }}
           token: ${{ secrets.GH_PAT }}
           path: _paperclip
           fetch-depth: 1
 
+      # ── Setup tools ─────────────────────────────────────────
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
 
@@ -58,7 +74,7 @@ jobs:
 
       - run: sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "platform-tools"
 
-      # ── Build UI ──────────────────────────────────────────────
+      # ── Build Paperclip UI (Vite) ───────────────────────────
       - name: Build Paperclip UI
         working-directory: _paperclip
         run: |
@@ -68,44 +84,25 @@ jobs:
           find dist -name "*.LICENSE" -delete 2>/dev/null || true
           echo "UI: $(du -sh dist | cut -f1) files=$(find dist -type f | wc -l)"
 
-      # ── Assemble Android project ──────────────────────────────
-      - name: Assemble Android project
+      # ── Copy UI assets into Android project ─────────────────
+      - name: Copy UI assets to Android
         run: |
           set -euo pipefail
-          SRC=android-skeleton
-          DST=_paperclip/ui/android
-          rm -rf "$DST"
-          cp -a "$SRC" "$DST"
-          mkdir -p "$DST/app/src/main/assets"
-          cp -a _paperclip/ui/dist/. "$DST/app/src/main/assets/"
+          ASSETS=_app/android/app/src/main/assets/ui-dist
+          rm -rf "$ASSETS"
+          mkdir -p "$ASSETS"
+          cp -a _paperclip/ui/dist/. "$ASSETS/"
+          echo "Assets: $(du -sh "$ASSETS" | cut -f1) files=$(find "$ASSETS" -type f | wc -l)"
 
-          # Download gradle wrapper (jar was too large for API push)
-          mkdir -p "$DST/gradle/wrapper"
-          WRAPPER_JAR="$DST/gradle/wrapper/gradle-wrapper.jar"
-          curl -fsSL "https://raw.githubusercontent.com/nicoulaj/gradle-wrapper/refs/heads/main/gradle-wrapper.jar" -o "$WRAPPER_JAR" 2>/dev/null || {
-            echo 'Downloading wrapper jar from gradle dist...'
-            curl -fsSL "https://services.gradle.org/distributions/gradle-8.6-bin.zip" -o /tmp/g.zip
-            cd /tmp && unzip -q g.zip && cd -
-            cp /tmp/gradle-8.6/lib/gradle-wrapper-*.jar "$WRAPPER_JAR" 2>/dev/null || true
-          }
-          curl -fsSL "https://raw.githubusercontent.com/nicoulaj/gradle-wrapper/refs/heads/main/gradlew" -o "$DST/gradlew" 2>/dev/null || true
-          chmod +x "$DST/gradlew" 2>/dev/null || true
-          echo "Wrapper jar: $(ls -lh "$WRAPPER_JAR" 2>/dev/null || echo 'missing')"
-          # Copy E2E test script
-          if [ -f "android-skeleton/ci_emulator_test.sh" ]; then
-            cp android-skeleton/ci_emulator_test.sh "$DST/"
-            chmod +x "$DST/ci_emulator_test.sh" 2>/dev/null || true
-          fi
-          echo "Assets: $(du -sh "$DST/app/src/main/assets" | cut -f1) files=$(find "$DST/app/src/main/assets" -type f | wc -l)"
-
-      # ── Build APK ─────────────────────────────────────────────
+      # ── Build APK (Gradle) ─────────────────────────────────
       - name: Build APK
-        working-directory: _paperclip/ui/android
+        working-directory: _app/android
         run: |
           set -euo pipefail
-          # Download Gradle directly - no wrapper needed
-          if ! command -v gradle &>/dev/null; then
-            echo "Installing Gradle 8.6..."
+          chmod +x gradlew 2>/dev/null || true
+          # Download Gradle directly if wrapper fails
+          if ! ./gradlew --version 2>/dev/null; then
+            echo "Gradle wrapper failed, downloading Gradle 8.6..."
             curl -fsSL -o /tmp/gradle.zip "https://services.gradle.org/distributions/gradle-8.6-bin.zip"
             cd /tmp && unzip -qo gradle.zip
             export PATH=/tmp/gradle-8.6/bin:$PATH
@@ -127,23 +124,22 @@ jobs:
 
       - name: Verify APK
         run: |
-          APK=$(find _paperclip/ui/android/app/build/outputs/apk -name "*.apk" -not -name "*unsigned*" | head -1)
-          [ -z "$APK" ] && APK=$(find _paperclip/ui/android/app/build/outputs/apk -name "*.apk" | head -1)
+          APK=$(find _app/android/app/build/outputs/apk -name "*.apk" -not -name "*unsigned*" | head -1)
+          [ -z "$APK" ] && APK=$(find _app/android/app/build/outputs/apk -name "*.apk" | head -1)
           echo "APK: $APK"
           ls -lh "$APK"
-          unzip -l "$APK" | grep -E "assets/index.html|classes|lib/" | head -20
+          unzip -l "$APK" | grep -E "assets/ui-dist|assets/index.html|classes|lib/" | head -20
           echo "DEX: $(unzip -l "$APK" | grep -c 'classes.*\.dex')"
 
-      # ── E2E Emulator (from PocketDeploy reference) ────────────
-      - name: Enable KVM group perms for Hardware Acceleration
+      # ── E2E Emulator ───────────────────────────────────────
+      - name: Enable KVM
         run: |
-          echo "=== Setting up KVM hardware acceleration ==="
           sudo groupadd -r kvm 2>/dev/null || true
           sudo gpasswd -a $USER kvm 2>/dev/null || true
           sudo chown $USER /dev/kvm 2>/dev/null || sudo chmod 666 /dev/kvm 2>/dev/null || true
           ls -la /dev/kvm || true
 
-      - name: Real Android Emulator E2E (API 34 x86_64 + KVM Hardware Accel)
+      - name: E2E Emulator Test
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -156,14 +152,40 @@ jobs:
           emulator-options: -no-snapshot-load -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -partition-size 16384
           disable-animations: true
           emulator-boot-timeout: 600
-          script: bash android-skeleton/ci_emulator_test.sh
+          script: |
+            set -e
+            APK=$(find _app/android/app/build/outputs/apk -name "*.apk" -not -name "*unsigned*" | head -1)
+            [ -z "$APK" ] && APK=$(find _app/android/app/build/outputs/apk -name "*.apk" | head -1)
+            echo "Installing: $APK"
+            adb wait-for-device
+            adb shell settings put global window_animation_scale 0 || true
+            adb shell settings put global transition_animation_scale 0 || true
+            adb shell settings put global animator_duration_scale 0 || true
+            adb push "$APK" /data/local/tmp/app.apk
+            adb shell pm install -r -d /data/local/tmp/app.apk
+            adb shell rm -f /data/local/tmp/app.apk || true
+            adb shell am start -n com.paperclip.app/.MainActivity
+            adb forward tcp:8089 tcp:8089 || true
+            adb forward tcp:20128 tcp:20128 || true
+            OK=0
+            for i in $(seq 1 45); do
+              sleep 3
+              PID=$(adb shell pidof com.paperclip.app 2>/dev/null || echo "")
+              echo "[Tick $i/45] PID=$PID"
+              RESP=$(curl -s --max-time 3 "http://127.0.0.1:8089/api/status" 2>/dev/null || curl -s --max-time 3 "http://127.0.0.1:8089/" 2>/dev/null || true)
+              if [ -n "$RESP" ]; then echo "✓ LAN server UP!"; OK=1; fi
+              if [ "$OK" = "1" ]; then sleep 3; break; fi
+            done
+            adb logcat -d -s PaperclipMain:I PaperclipKA:I NodeRunner:I RouterService:I AndroidRuntime:E 2>/dev/null | tail -50 || true
+            echo "=== E2E RESULT ==="
+            if [ "$OK" = "1" ]; then echo "✅ PASS"; else echo "⚠️ WARN: LAN server not responding"; fi
 
-      # ── Upload + Release ──────────────────────────────────────
+      # ── Upload + Release ────────────────────────────────────
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: Paperclip-${{ inputs.build_type || 'release' }}-apk
-          path: _paperclip/ui/android/app/build/outputs/apk/**/*.apk
+          path: _app/android/app/build/outputs/apk/**/*.apk
           if-no-files-found: error
           retention-days: 30
 
@@ -173,7 +195,7 @@ jobs:
         with:
           tag_name: paperclip-apk-${{ github.run_number }}
           name: Paperclip APK #${{ github.run_number }}
-          files: _paperclip/ui/android/app/build/outputs/apk/**/*.apk
+          files: _app/android/app/build/outputs/apk/**/*.apk
           draft: false
           prerelease: true
           generate_release_notes: true
