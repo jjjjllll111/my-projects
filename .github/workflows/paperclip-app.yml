@@ -1,4 +1,5 @@
 # Build Paperclip Android APK with SEA (Node.js ARM64 ELF)
+# Caches: Termux node binary, shared libs, SEA blob — only rebuilds when upstream changes
 name: Build Paperclip APK
 
 on:
@@ -16,6 +17,10 @@ on:
         description: "debug or release"
         required: false
         default: release
+      force_rebuild:
+        description: "Force rebuild SEA (ignore cache)"
+        required: false
+        default: "false"
   push:
     branches: [main]
     paths: [".github/workflows/paperclip-app.yml"]
@@ -56,7 +61,7 @@ jobs:
           path: _paperclip
           fetch-depth: 1
 
-      # ── Setup tools ─────────────────────────────────────────
+      # ── Setup latest tools ──────────────────────────────────
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
 
@@ -66,7 +71,7 @@ jobs:
         with: { version: 9, run_install: false }
 
       - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: "17" }
+        with: { distribution: temurin, java-version: "21" }
 
       - uses: android-actions/setup-android@v3
 
@@ -74,6 +79,28 @@ jobs:
         run: |
           sdkmanager --install "ndk;27.2.12479018" "platforms;android-35" "build-tools;35.0.0" "platform-tools"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+
+      # ── Cache: Termux node + shared libs ────────────────────
+      - name: Cache SEA dependencies
+        id: cache-sea
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/sea-host
+            ${{ runner.temp }}/termux-libs
+          key: sea-deps-v1-${{ hashFiles('.github/workflows/paperclip-app.yml') }}
+          restore-keys: |
+            sea-deps-v1-
+
+      # ── Cache: SEA blob ─────────────────────────────────────
+      - name: Cache SEA blob
+        id: cache-blob
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/sea-prep.blob
+          key: sea-blob-v1-${{ hashFiles('.github/workflows/paperclip-app.yml') }}
+          restore-keys: |
+            sea-blob-v1-
 
       # ── Build Paperclip UI ──────────────────────────────────
       - name: Build Paperclip UI
@@ -85,7 +112,6 @@ jobs:
           find dist -name "*.LICENSE" -delete 2>/dev/null || true
           echo "UI: $(du -sh dist | cut -f1) files=$(find dist -type f | wc -l)"
 
-      # ── Copy UI assets ──────────────────────────────────────
       - name: Copy UI assets to Android
         run: |
           set -euo pipefail
@@ -95,183 +121,124 @@ jobs:
           cp -a _paperclip/ui/dist/. "$ASSETS/"
           echo "Assets: $(du -sh "$ASSETS" | cut -f1) files=$(find "$ASSETS" -type f | wc -l)"
 
-      # ── Extract Termux Node.js (ARM64 Bionic ELF) ───────────
+      # ── Extract Termux Node.js (cached) ─────────────────────
       - name: Extract Termux Node.js ARM64
+        if: steps.cache-sea.outputs.cache-hit != 'true' || inputs.force_rebuild == 'true'
         run: |
           set -euo pipefail
           TMP="$RUNNER_TEMP/termux-node"
           rm -rf "$TMP"
           mkdir -p "$TMP/nex" "$TMP/libs"
 
-          # Download Termux Packages index
           PKGINDEX="$TMP/Packages"
           curl -fsSL https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages -o "$PKGINDEX"
 
-          # Helper to find package file
           pkg_file() { awk -v RS= -v FS='\n' -v pat="^Package: $1\$" '$1 ~ pat { for (i=1;i<=NF;i++) if ($i ~ /^Filename:/) { sub(/^Filename: /,"",$i); print $i; exit } }' "$PKGINDEX"; }
-
-          # Helper to extract deb
           expand_deb() { local deb="$1" dest="$2"; local tmp; tmp=$(mktemp -d); (cd "$tmp" && ar x "$deb" && tar -xf data.tar.* -C "$dest"); rm -rf "$tmp"; }
 
-          # Download Node.js
           NF=$(pkg_file nodejs)
           [ -z "$NF" ] && { echo "FATAL: nodejs not in Packages"; exit 1; }
           curl -fsSL "https://packages.termux.dev/apt/termux-main/$NF" -o "$TMP/node.deb"
-          mkdir -p "$TMP/nex"
-          (cd "$TMP/nex" && ar x "$TMP/node.deb" && tar -xf data.tar.*)
+          (cd "$TMP" && mkdir -p nex && cd nex && ar x "$TMP/node.deb" && tar -xf data.tar.*)
 
           NODE_BIN="$TMP/nex/data/data/com.termux/files/usr/bin/node"
           test -x "$NODE_BIN" || { echo "FATAL: node missing"; exit 1; }
 
-          # Save for SEA
           mkdir -p "$RUNNER_TEMP/sea-host"
           cp "$NODE_BIN" "$RUNNER_TEMP/sea-host/node-bionic"
           chmod +x "$RUNNER_TEMP/sea-host/node-bionic"
           file "$RUNNER_TEMP/sea-host/node-bionic"
 
-          # Download shared libs
           DEPS="zlib c-ares libsqlite libffi openssl libicu libc++ libandroid-shmem libandroid-spawn"
+          AGG="$RUNNER_TEMP/termux-libs"
+          mkdir -p "$AGG"
           for pkg in $DEPS; do
             F=$(pkg_file "$pkg" || true)
-            [ -z "$F" ] && { echo "::warning::pkg $pkg not found"; continue; }
-            echo "fetch $pkg -> $F"
+            [ -z "$F" ] && continue
             curl -fsSL "https://packages.termux.dev/apt/termux-main/$F" -o "$TMP/$pkg.deb" || continue
             mkdir -p "$TMP/libs/$pkg"
             expand_deb "$TMP/$pkg.deb" "$TMP/libs/$pkg"
           done
-
-          # Aggregate shared libs
-          AGG="$TMP/libs/_agg"
-          mkdir -p "$AGG"
-          find "$TMP/libs" -type f -name "*.so*" -not -path "*/_agg/*" | while read -r f; do
-            cp -n "$f" "$AGG"/ 2>/dev/null || cp "$f" "$AGG"/
-          done
-          find "$TMP/nex" -type f -name "*.so*" | while read -r f; do
-            cp -n "$f" "$AGG"/ 2>/dev/null || true
-          done
-
-          # Handle libc++_shared.so
+          find "$TMP/libs" -type f -name "*.so*" -not -path "*/_agg/*" | while read -r f; do cp -n "$f" "$AGG"/ 2>/dev/null || cp "$f" "$AGG"/; done
+          find "$TMP/nex" -type f -name "*.so*" | while read -r f; do cp -n "$f" "$AGG"/ 2>/dev/null || true; done
           if [ ! -f "$AGG/libc++_shared.so" ]; then
-            for f in "$AGG"/libc*.so* "$AGG"/ *c++*.so*; do
+            for f in "$AGG"/libc*.so* "$AGG"/*c++*.so*; do
               [ -f "$f" ] || continue
-              if file "$f" 2>&1 | grep -qi "shared object"; then
-                cp -a "$f" "$AGG/libc++_shared.so"
-                break
-              fi
+              if file "$f" 2>&1 | grep -qi "shared object"; then cp -a "$f" "$AGG/libc++_shared.so"; break; fi
             done
           fi
-
-          # Remove conflicting system libs
           rm -f "$AGG"/libz.so* "$AGG"/libc.so* "$AGG"/libm.so* "$AGG"/libdl.so* || true
+          echo "SEA deps cached: node=$(ls -lh "$RUNNER_TEMP/sea-host/node-bionic" | awk '{print $5}') libs=$(ls "$AGG" | wc -l)"
 
-          mkdir -p _app/android/app/src/main/assets/node-libs
-          cp -a "$AGG"/* _app/android/app/src/main/assets/node-libs/ 2>/dev/null || true
-          echo "node-libs: $(ls _app/android/app/src/main/assets/node-libs | wc -l) files"
-
-      # ── Build SEA binary ────────────────────────────────────
+      # ── Build SEA binary (cached) ───────────────────────────
       - name: Build SEA binary
+        if: steps.cache-blob.outputs.cache-hit != 'true' || inputs.force_rebuild == 'true'
         run: |
           set -euo pipefail
 
-          # Create SEA entry point (CJS)
           cat > "$RUNNER_TEMP/sea-entry.js" << 'SEA_EOF'
           const fs = require("fs");
           const path = require("path");
-
-          // Load Paperclip server
           const serverPath = path.join(__dirname, "server.js");
-          if (fs.existsSync(serverPath)) {
-            require(serverPath);
-          } else {
-            console.error("Paperclip server not found at", serverPath);
-            process.exit(1);
-          }
+          if (fs.existsSync(serverPath)) { require(serverPath); }
+          else { console.error("server.js not found"); process.exit(1); }
           SEA_EOF
 
-          # Create simple Paperclip server
           cat > "$RUNNER_TEMP/server.js" << 'SVR_EOF'
           const http = require("http");
           const fs = require("fs");
           const path = require("path");
-
           const PORT = parseInt(process.env.PORT || "3100", 10);
           const ASSETS_DIR = path.join(__dirname, "ui-dist");
-
-          const MIME = {
-            ".html": "text/html; charset=utf-8",
-            ".js": "application/javascript; charset=utf-8",
-            ".css": "text/css; charset=utf-8",
-            ".json": "application/json; charset=utf-8",
-            ".png": "image/png",
-            ".svg": "image/svg+xml",
-            ".ico": "image/x-icon",
-          };
-
-          const API = {
-            "/api/health": () => ({ status: "ok", timestamp: Date.now() }),
-            "/api/status": () => ({ ok: true, port: PORT, mode: "standalone" }),
-          };
-
-          const server = http.createServer((req, res) => {
-            const url = new URL(req.url, `http://localhost:${PORT}`);
-            res.setHeader("Access-Control-Allow-Origin", "*");
-            if (req.method === "OPTIONS") { res.writeHead(204); return res.end(); }
-            if (API[url.pathname]) {
-              res.writeHead(200, { "Content-Type": "application/json" });
-              return res.end(JSON.stringify(API[url.pathname]()));
-            }
-            let fp = path.join(ASSETS_DIR, url.pathname === "/" ? "index.html" : url.pathname);
-            if (!fs.existsSync(fp) || fs.statSync(fp).isDirectory()) fp = path.join(ASSETS_DIR, "index.html");
-            if (!fs.existsSync(fp)) { res.writeHead(404); return res.end("Not Found"); }
-            const ext = path.extname(fp).toLowerCase();
-            try {
-              const content = fs.readFileSync(fp);
-              res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream" });
-              res.end(content);
-            } catch (e) { res.writeHead(500); res.end("Error"); }
-          });
-
-          server.listen(PORT, "0.0.0.0", () => {
-            console.log(`Paperclip server on http://0.0.0.0:${PORT}`);
-          });
+          const MIME = {".html":"text/html; charset=utf-8",".js":"application/javascript; charset=utf-8",".css":"text/css; charset=utf-8",".json":"application/json; charset=utf-8",".png":"image/png",".svg":"image/svg+xml",".ico":"image/x-icon"};
+          const API = {"/api/health":()=>({status:"ok",timestamp:Date.now()}),"/api/status":()=>({ok:true,port:PORT,mode:"standalone"})};
+          http.createServer((req,res)=>{
+            const url=new URL(req.url,`http://localhost:${PORT}`);
+            res.setHeader("Access-Control-Allow-Origin","*");
+            if(req.method==="OPTIONS"){res.writeHead(204);return res.end();}
+            if(API[url.pathname]){res.writeHead(200,{"Content-Type":"application/json"});return res.end(JSON.stringify(API[url.pathname]()));}
+            let fp=path.join(ASSETS_DIR,url.pathname==="/"?"index.html":url.pathname);
+            if(!fs.existsSync(fp)||fs.statSync(fp).isDirectory())fp=path.join(ASSETS_DIR,"index.html");
+            if(!fs.existsSync(fp)){res.writeHead(404);return res.end("Not Found");}
+            try{const c=require("fs").readFileSync(fp);res.writeHead(200,{"Content-Type":MIME[path.extname(fp).toLowerCase()]||"application/octet-stream"});res.end(c);}
+            catch(e){res.writeHead(500);res.end("Error");}
+          }).listen(PORT,"0.0.0.0",()=>console.log(`Paperclip on http://0.0.0.0:${PORT}`));
           SVR_EOF
 
-          # Create SEA config
           cat > "$RUNNER_TEMP/sea-config.json" << SEA_JSON
-          {
-            "main": "$RUNNER_TEMP/sea-entry.js",
-            "output": "$RUNNER_TEMP/sea-prep.blob",
-            "disableExperimentalSEAWarning": true,
-            "useSnapshot": false,
-            "useCodeCache": false
-          }
+          {"main":"$RUNNER_TEMP/sea-entry.js","output":"$RUNNER_TEMP/sea-prep.blob","disableExperimentalSEAWarning":true,"useSnapshot":false,"useCodeCache":false}
           SEA_JSON
 
-          # Generate blob
           node --experimental-sea-config "$RUNNER_TEMP/sea-config.json"
           ls -lh "$RUNNER_TEMP/sea-prep.blob"
 
-          # Inject into Bionic ELF
           cp "$RUNNER_TEMP/sea-host/node-bionic" "$RUNNER_TEMP/myapp"
           chmod +x "$RUNNER_TEMP/myapp"
-          npm install --no-save postject 2>&1 | tail -5
+          npm install --no-save postject 2>&1 | tail -3
           npx postject "$RUNNER_TEMP/myapp" NODE_SEA_BLOB "$RUNNER_TEMP/sea-prep.blob" \
             --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
 
-          echo "SEA binary built:"
           file "$RUNNER_TEMP/myapp"
           ls -lh "$RUNNER_TEMP/myapp"
 
-          # Stage for APK
-          mkdir -p _app/android/app/src/main/assets/myapp-dir
-          cp "$RUNNER_TEMP/myapp" _app/android/app/src/main/assets/myapp-dir/myapp
-          chmod +x _app/android/app/src/main/assets/myapp-dir/myapp
-          cp "$RUNNER_TEMP/server.js" _app/android/app/src/main/assets/myapp-dir/
-          cp -a _paperclip/ui/dist _app/android/app/src/main/assets/myapp-dir/ui-dist
+      # ── Stage SEA assets ────────────────────────────────────
+      - name: Stage SEA assets for APK
+        run: |
+          set -euo pipefail
+          DEST=_app/android/app/src/main/assets
+          rm -rf "$DEST/myapp-dir" "$DEST/node-libs"
+          mkdir -p "$DEST/myapp-dir" "$DEST/node-libs"
 
-          echo "myapp staged: $(du -sh _app/android/app/src/main/assets/myapp-dir | cut -f1)"
+          cp "$RUNNER_TEMP/myapp" "$DEST/myapp-dir/myapp"
+          chmod +x "$DEST/myapp-dir/myapp"
+          cp "$RUNNER_TEMP/server.js" "$DEST/myapp-dir/"
+          cp -a _paperclip/ui/dist "$DEST/myapp-dir/ui-dist"
+          cp -a "$RUNNER_TEMP/termux-libs"/* "$DEST/node-libs/" 2>/dev/null || true
 
-      # ── Strip native libs ───────────────────────────────────
+          echo "myapp: $(du -sh "$DEST/myapp-dir/myapp" | cut -f1)"
+          echo "node-libs: $(ls "$DEST/node-libs" | wc -l) files $(du -sh "$DEST/node-libs" | cut -f1)"
+          echo "ui-dist: $(du -sh "$DEST/myapp-dir/ui-dist" | cut -f1)"
+
       - name: Strip native libs
         run: |
           set -euo pipefail
@@ -280,7 +247,7 @@ jobs:
             [ -f "$f" ] || continue
             "$STRIP" --strip-all --strip-unneeded "$f" 2>/dev/null || true
           done
-          echo "Stripped node-libs: $(du -sh _app/android/app/src/main/assets/node-libs | cut -f1)"
+          echo "Stripped: $(du -sh _app/android/app/src/main/assets/node-libs | cut -f1)"
 
       # ── Build APK ──────────────────────────────────────────
       - name: Build APK
@@ -289,10 +256,8 @@ jobs:
           set -euo pipefail
           chmod +x gradlew 2>/dev/null || true
           if ! ./gradlew --version 2>/dev/null; then
-            echo "Downloading Gradle 8.6..."
             curl -fsSL -o /tmp/gradle.zip "https://services.gradle.org/distributions/gradle-8.6-bin.zip"
-            cd /tmp && unzip -qo gradle.zip
-            export PATH=/tmp/gradle-8.6/bin:$PATH
+            cd /tmp && unzip -qo gradle.zip && export PATH=/tmp/gradle-8.6/bin:$PATH
           fi
           gradle --version | head -3
           if [ "${{ inputs.build_type }}" = "debug" ]; then
@@ -317,6 +282,7 @@ jobs:
           ls -lh "$APK"
           echo "=== Contents ==="
           unzip -l "$APK" | grep -E "myapp|node-libs|ui-dist|assets/index" | head -20
+          echo "APK_PATH=$APK" >> "$GITHUB_ENV"
 
       # ── E2E Emulator ───────────────────────────────────────
       - name: Enable KVM
@@ -340,7 +306,8 @@ jobs:
           emulator-boot-timeout: 600
           script: |
             set -e
-            APK=$(find _app/android/app/build/outputs/apk -name "*.apk" -not -name "*unsigned*" | head -1)
+            APK="${{ env.APK_PATH }}"
+            [ -z "$APK" ] && APK=$(find _app/android/app/build/outputs/apk -name "*.apk" -not -name "*unsigned*" | head -1)
             [ -z "$APK" ] && APK=$(find _app/android/app/build/outputs/apk -name "*.apk" | head -1)
             echo "Installing: $APK"
             adb wait-for-device
