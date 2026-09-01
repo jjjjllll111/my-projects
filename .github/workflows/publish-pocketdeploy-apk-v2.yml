@@ -204,6 +204,10 @@ jobs:
           # Keep a copy for SEA injection as host ELF (still NDK/Bionic provenance)
           mkdir -p "$RUNNER_TEMP/sea-host"
           cp "$NODE_BIN" "$RUNNER_TEMP/sea-host/node-bionic"
+          mkdir -p android/app/src/main/jniLibs/arm64-v8a
+          cp "$NODE_BIN" android/app/src/main/jniLibs/arm64-v8a/libnode_bin.so
+          cp "$NODE_BIN" android/app/src/main/jniLibs/arm64-v8a/libnode.so
+          chmod +x android/app/src/main/jniLibs/arm64-v8a/*.so
           chmod +x "$RUNNER_TEMP/sea-host/node-bionic"
           file "$RUNNER_TEMP/sea-host/node-bionic"; readelf -h "$RUNNER_TEMP/sea-host/node-bionic" | head -20 || true
           # Also produce legacy assets/node-bionic + node-libs for fallback
