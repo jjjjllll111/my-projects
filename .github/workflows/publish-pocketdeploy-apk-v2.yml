@@ -258,32 +258,35 @@ jobs:
           mkdir -p "$RUNNER_TEMP/sea-libs"; cp -a "$AGG"/* "$RUNNER_TEMP/sea-libs"/ 2>/dev/null || true
           echo "SEA host + libs ready: $(ls "$RUNNER_TEMP/sea-libs" | wc -l) libs"
 
-      - name: Stage clean Bionic Node runtime assets & native libraries
+            - name: Stage clean Bionic Node runtime assets & native libraries with DT_RUNPATH
         run: |
           set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq patchelf
           STRIP="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
           test -x "$STRIP" || STRIP="llvm-strip"
 
-          # 1. Stage original untouched node-libs to assets/node-libs (extracted to filesDir at runtime)
+          # 1. Stage original untouched node-libs to assets/node-libs
           mkdir -p android/app/src/main/assets/node-libs
           cp -a "$RUNNER_TEMP/termux-node/libs/_agg"/* android/app/src/main/assets/node-libs/ 2>/dev/null || true
           
-          # 2. Stage node-bionic executable to assets/node-bionic
+          # 2. Stage node-bionic executable to assets/node-bionic and embed strict RUNPATH
           cp -a "$RUNNER_TEMP/sea-host/node-bionic" android/app/src/main/assets/node-bionic
           chmod +x android/app/src/main/assets/node-bionic
+          patchelf --set-rpath '$ORIGIN/node-libs:$ORIGIN' android/app/src/main/assets/node-bionic 2>/dev/null || true
 
-          # 3. Also copy to jniLibs/arm64-v8a as standard fallback
+          # 3. Also copy to jniLibs/arm64-v8a as fallback
           mkdir -p android/app/src/main/jniLibs/arm64-v8a
           cp -a "$RUNNER_TEMP/termux-node/libs/_agg"/* android/app/src/main/jniLibs/arm64-v8a/ 2>/dev/null || true
           cp -a "$RUNNER_TEMP/sea-host/node-bionic" android/app/src/main/jniLibs/arm64-v8a/libnode_bin.so 2>/dev/null || true
 
-          # 4. Light strip comments only (do NOT touch DT_NEEDED or DT_VERNEED)
+          # 4. Light strip comments only
           "$STRIP" --strip-unneeded --remove-section=.comment android/app/src/main/assets/node-bionic 2>/dev/null || true
           for f in android/app/src/main/assets/node-libs/*.so*; do
             [ -f "$f" ] && "$STRIP" --strip-unneeded --remove-section=.comment "$f" 2>/dev/null || true
           done
 
-          echo "=== Staged clean assets/node-libs ($(ls android/app/src/main/assets/node-libs | wc -l) files) ==="
+          echo "=== Verified RUNPATH on node-bionic ==="
+          patchelf --print-rpath android/app/src/main/assets/node-bionic || true
           ls -la android/app/src/main/assets/node-libs | head -n 30
 
       - name: Build Node.js from source via NDK (slow, Bionic native)
