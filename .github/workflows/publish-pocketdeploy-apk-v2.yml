@@ -258,7 +258,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/sea-libs"; cp -a "$AGG"/* "$RUNNER_TEMP/sea-libs"/ 2>/dev/null || true
           echo "SEA host + libs ready: $(ls "$RUNNER_TEMP/sea-libs" | wc -l) libs"
 
-            - name: Stage clean Bionic Node runtime assets & native libraries with DT_RUNPATH
+      - name: Stage clean Bionic Node runtime assets & native libraries with DT_RUNPATH
         run: |
           set -euo pipefail
           sudo apt-get update -qq && sudo apt-get install -y -qq patchelf
