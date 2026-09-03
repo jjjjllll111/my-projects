@@ -1,5 +1,6 @@
-# Build Paperclip Android APK with SEA (Bionic Native Node.js ARM64 ELF)
-# v2 架构: NDK 29 -> Bionic ELF node -> SEA注入 -> jniLibs/assets 双路Stage -> 自动签名
+# Build Paperclip Android APK (Clean Bionic Node.js ARM64 Runtime)
+# 架构: NDK 29 -> Bionic ELF node -> 独立 server.js + ui-dist -> jniLibs/assets 提权 -> 自动签名
+# 彻底移除 SEA postject 黑盒注入，采用纯净原生的 Node.js 解释执行方案
 name: Build Paperclip APK
 
 on:
@@ -17,10 +18,6 @@ on:
         description: "debug or release"
         required: false
         default: release
-      force_rebuild:
-        description: "Force rebuild SEA (ignore cache)"
-        required: false
-        default: "false"
       app_id:
         description: "Android applicationId for parallel install (e.g. com.paperclip.lab)"
         required: false
@@ -120,15 +117,6 @@ jobs:
           find dist -name "*.LICENSE" -delete 2>/dev/null || true
           echo "UI: $(du -sh dist | cut -f1) files=$(find dist -type f | wc -l)"
 
-      - name: Copy UI assets to Android
-        run: |
-          set -euo pipefail
-          ASSETS=_app/android/app/src/main/assets/ui-dist
-          rm -rf "$ASSETS"
-          mkdir -p "$ASSETS"
-          cp -a _paperclip/ui/dist/. "$ASSETS/"
-          echo "Assets: $(du -sh "$ASSETS" | cut -f1) files=$(find "$ASSETS" -type f | wc -l)"
-
       # ── Extract Clean Bionic Node Runtime (v2 standard) ───────
       - name: Extract Bionic Node.js ARM64 & Native Dependencies
         run: |
@@ -153,10 +141,10 @@ jobs:
           NODE_BIN="$TMP/nex/data/data/com.termux/files/usr/bin/node"
           test -x "$NODE_BIN" || { echo "FATAL: node missing"; exit 1; }
 
-          mkdir -p "$RUNNER_TEMP/sea-host"
-          cp "$NODE_BIN" "$RUNNER_TEMP/sea-host/node-bionic"
-          chmod +x "$RUNNER_TEMP/sea-host/node-bionic"
-          file "$RUNNER_TEMP/sea-host/node-bionic"
+          mkdir -p "$RUNNER_TEMP/bionic-node"
+          cp "$NODE_BIN" "$RUNNER_TEMP/bionic-node/node"
+          chmod +x "$RUNNER_TEMP/bionic-node/node"
+          file "$RUNNER_TEMP/bionic-node/node"
 
           DEPS="zlib c-ares libsqlite libffi openssl libicu libc++ libandroid-shmem libandroid-spawn jemalloc"
           AGG="$TMP/agg"
@@ -194,53 +182,32 @@ jobs:
           test -f "$AGG/libcrypto.so.3" || cp -a "$TMP/libs/openssl"/*libcrypto.so.3* "$AGG/libcrypto.so.3" 2>/dev/null || true
           test -f "$AGG/libssl.so.3" || cp -a "$TMP/libs/openssl"/*libssl.so.3* "$AGG/libssl.so.3" 2>/dev/null || true
 
-          mkdir -p "$RUNNER_TEMP/sea-libs"
-          cp -a "$AGG"/* "$RUNNER_TEMP/sea-libs"/ 2>/dev/null || true
-          echo "Bionic dependencies ready: $(ls "$RUNNER_TEMP/sea-libs" | wc -l) files"
+          mkdir -p "$RUNNER_TEMP/bionic-libs"
+          cp -a "$AGG"/* "$RUNNER_TEMP/bionic-libs"/ 2>/dev/null || true
+          echo "Bionic dependencies ready: $(ls "$RUNNER_TEMP/bionic-libs" | wc -l) files"
 
-      # ── Build SEA Binary with CodeCache ──────────────────────
-      - name: Build SEA Binary
+      # ── Generate Standalone Web Server ───────────────────────
+      - name: Generate Standalone Node Server
         run: |
           set -euo pipefail
-
-          cat > "$RUNNER_TEMP/sea-entry.js" << 'SEA_EOF'
-          const fs = require("node:fs");
-          const path = require("node:path");
-          const serverCandidates = [
-            path.join(__dirname, "server.js"),
-            path.join(process.cwd(), "server.js"),
-            "./server.js"
-          ];
-          let entry = null;
-          for (const c of serverCandidates) {
-            try {
-              const p = path.resolve(c);
-              if (fs.existsSync(p)) { entry = p; break; }
-            } catch {}
-          }
-          if (!entry) {
-            console.error("SEA: server.js not found in candidates", serverCandidates);
-            process.exit(1);
-          }
-          console.log("SEA Paperclip bootstrap ->", entry, "execPath=", process.execPath);
-          require(entry);
-          SEA_EOF
-
           cat > "$RUNNER_TEMP/server.js" << 'SVR_EOF'
           const http = require("node:http");
           const fs = require("node:fs");
           const path = require("node:path");
           const PORT = parseInt(process.env.PORT || "3100", 10);
+          
           const candidates = [
             path.join(__dirname, "ui-dist"),
             path.join(__dirname, "assets", "ui-dist"),
             path.join(process.cwd(), "ui-dist"),
+            path.join(process.cwd(), "assets", "ui-dist"),
             "./ui-dist"
           ];
           let ASSETS_DIR = candidates[0];
           for (const c of candidates) {
             if (fs.existsSync(c)) { ASSETS_DIR = c; break; }
           }
+          
           const MIME = {
             ".html": "text/html; charset=utf-8",
             ".js": "application/javascript; charset=utf-8",
@@ -254,7 +221,7 @@ jobs:
           };
           const API = {
             "/api/health": () => ({ status: "ok", timestamp: Date.now() }),
-            "/api/status": () => ({ ok: true, port: PORT, mode: "standalone", service: "paperclip" })
+            "/api/status": () => ({ ok: true, port: PORT, mode: "standalone-node", service: "paperclip" })
           };
 
           http.createServer((req, res) => {
@@ -279,35 +246,10 @@ jobs:
             } catch (e) {
               res.writeHead(500); res.end("Error");
             }
-          }).listen(PORT, "0.0.0.0", () => console.log(`Paperclip on http://0.0.0.0:${PORT} (assets: ${ASSETS_DIR})`));
+          }).listen(PORT, "0.0.0.0", () => console.log(`Paperclip running on http://0.0.0.0:${PORT} (assets: ${ASSETS_DIR})`));
           SVR_EOF
 
-          USE_CODECACHE="true"
-          if [ "${{ inputs.build_type }}" = "debug" ]; then USE_CODECACHE="false"; fi
-
-          cat > "$RUNNER_TEMP/sea-config.json" << SEA_JSON
-          {
-            "main": "$RUNNER_TEMP/sea-entry.js",
-            "output": "$RUNNER_TEMP/sea-prep.blob",
-            "disableExperimentalSEAWarning": true,
-            "useSnapshot": false,
-            "useCodeCache": $USE_CODECACHE
-          }
-          SEA_JSON
-
-          node --experimental-sea-config "$RUNNER_TEMP/sea-config.json"
-          ls -lh "$RUNNER_TEMP/sea-prep.blob"
-
-          cp "$RUNNER_TEMP/sea-host/node-bionic" "$RUNNER_TEMP/myapp"
-          chmod +x "$RUNNER_TEMP/myapp"
-          npm install --no-save postject 2>&1 | tail -3
-          npx postject "$RUNNER_TEMP/myapp" NODE_SEA_BLOB "$RUNNER_TEMP/sea-prep.blob" \
-            --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
-
-          file "$RUNNER_TEMP/myapp"
-          ls -lh "$RUNNER_TEMP/myapp"
-
-      # ── Stage Full Dual-Path Assets & JNI Promotion (v2 standard) ─
+      # ── Stage Runtime Assets & Promote jniLibs (v2 Standard) ─
       - name: Stage clean runtime assets and promote jniLibs with DT_RUNPATH
         run: |
           set -euo pipefail
@@ -316,38 +258,39 @@ jobs:
           test -x "$STRIP" || STRIP="llvm-strip"
 
           DEST="_app/android/app/src/main/assets"
-          mkdir -p "$DEST/myapp-dir" "$DEST/node-libs"
+          mkdir -p "$DEST/node-libs" "$DEST/ui-dist"
           mkdir -p _app/android/app/src/main/jniLibs/arm64-v8a
 
-          # 1. Stage assets for fallback
-          cp "$RUNNER_TEMP/myapp" "$DEST/myapp-dir/myapp"
-          cp "$RUNNER_TEMP/myapp" "$DEST/node-bionic"
-          chmod +x "$DEST/myapp-dir/myapp" "$DEST/node-bionic"
-          cp "$RUNNER_TEMP/server.js" "$DEST/myapp-dir/"
-          cp -a _paperclip/ui/dist "$DEST/myapp-dir/ui-dist"
-          cp -a "$RUNNER_TEMP/sea-libs"/* "$DEST/node-libs/" 2>/dev/null || true
+          # 1. 拷贝 Node 原生可执行文件与服务器入口
+          cp "$RUNNER_TEMP/bionic-node/node" "$DEST/node-bionic"
+          chmod +x "$DEST/node-bionic"
+          cp "$RUNNER_TEMP/server.js" "$DEST/server.js"
+          
+          # 2. 拷贝前端静态资源
+          cp -a _paperclip/ui/dist/. "$DEST/ui-dist/"
 
-          # 2. Embed strict DT_RUNPATH on executables
-          patchelf --set-rpath '$ORIGIN/node-libs:$ORIGIN:../node-libs' "$DEST/myapp-dir/myapp" 2>/dev/null || true
-          patchelf --set-rpath '$ORIGIN/node-libs:$ORIGIN:../node-libs' "$DEST/node-bionic" 2>/dev/null || true
+          # 3. 拷贝全部依赖 .so 到 assets/node-libs
+          cp -a "$RUNNER_TEMP/bionic-libs"/* "$DEST/node-libs/" 2>/dev/null || true
 
-          # 3. Promote ALL native shared libs & binary to jniLibs for nativeLibraryDir execution (vivo/oppo fix)
-          cp -a "$RUNNER_TEMP/sea-libs"/* _app/android/app/src/main/jniLibs/arm64-v8a/ 2>/dev/null || true
-          cp -a "$RUNNER_TEMP/myapp" _app/android/app/src/main/jniLibs/arm64-v8a/libmyapp.so
-          cp -a "$RUNNER_TEMP/myapp" _app/android/app/src/main/jniLibs/arm64-v8a/libnode_bin.so
-          cp -a "$RUNNER_TEMP/myapp" _app/android/app/src/main/jniLibs/arm64-v8a/libnode.so
+          # 4. 嵌入严谨的 DT_RUNPATH 寻址
+          patchelf --set-rpath '$ORIGIN/node-libs:$ORIGIN' "$DEST/node-bionic" 2>/dev/null || true
+
+          # 5. 全量提升 (Promotion) 到 jniLibs 以解决 vivo/oppo/xiaomi 等高版本 Android noexec 限制
+          cp -a "$RUNNER_TEMP/bionic-libs"/* _app/android/app/src/main/jniLibs/arm64-v8a/ 2>/dev/null || true
+          cp -a "$RUNNER_TEMP/bionic-node/node" _app/android/app/src/main/jniLibs/arm64-v8a/libnode.so
+          cp -a "$RUNNER_TEMP/bionic-node/node" _app/android/app/src/main/jniLibs/arm64-v8a/libnode_bin.so
           chmod +x _app/android/app/src/main/jniLibs/arm64-v8a/*.so
 
-          # 4. Strip debug comments safely
-          "$STRIP" --strip-unneeded --remove-section=.comment "$DEST/myapp-dir/myapp" 2>/dev/null || true
+          # 6. 安全剔除注释与调试段
+          "$STRIP" --strip-unneeded --remove-section=.comment "$DEST/node-bionic" 2>/dev/null || true
           for f in "$DEST/node-libs"/*.so* _app/android/app/src/main/jniLibs/arm64-v8a/*.so*; do
             [ -f "$f" ] && "$STRIP" --strip-unneeded --remove-section=.comment "$f" 2>/dev/null || true
           done
 
-          echo "myapp size: $(du -sh "$DEST/myapp-dir/myapp" | cut -f1)"
+          echo "node-bionic size: $(du -sh "$DEST/node-bionic" | cut -f1)"
           echo "node-libs staged: $(ls "$DEST/node-libs" | wc -l) files"
           echo "jniLibs promoted: $(ls _app/android/app/src/main/jniLibs/arm64-v8a | wc -l) files"
-          echo "ui-dist staged: $(du -sh "$DEST/myapp-dir/ui-dist" | cut -f1)"
+          echo "ui-dist staged: $(du -sh "$DEST/ui-dist" | cut -f1)"
 
       # ── Build & Sign APK (v2 Gradle Standard) ────────────────
       - name: Build APK (Gradle)
@@ -381,17 +324,17 @@ jobs:
           ls -lh "$APK"; du -sh "$APK"
 
       # ── Verify APK ──────────────────────────────────────────
-      - name: Verify APK (STRICT SEA)
+      - name: Verify APK (Strict Check)
         run: |
           set -euo pipefail
           APK="_app/android/${{ env.APK }}"
           echo "=== Verify APK Contents: $APK ==="
           ls -lh "$APK"
-          unzip -l "$APK" | grep -E "libmyapp|libnode|ui-dist|node-libs" | head -40 || true
-          if ! unzip -l "$APK" | grep -q "lib/arm64-v8a/libmyapp.so"; then
-            echo "::error::STRICT: lib/arm64-v8a/libmyapp.so missing in APK"; exit 1;
+          unzip -l "$APK" | grep -E "libnode|ui-dist|node-libs" | head -40 || true
+          if ! unzip -l "$APK" | grep -q "lib/arm64-v8a/libnode.so"; then
+            echo "::error::STRICT: lib/arm64-v8a/libnode.so missing in APK"; exit 1;
           fi
-          if ! unzip -l "$APK" | grep -q "assets/ui-dist/index.html\|assets/myapp-dir/ui-dist/index.html"; then
+          if ! unzip -l "$APK" | grep -q "assets/ui-dist/index.html"; then
             echo "::error::STRICT: UI dist index.html missing in APK"; exit 1;
           fi
           echo "APK Verification PASS!"
@@ -401,7 +344,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: Paperclip-${{ inputs.app_id || 'default' }}-${{ inputs.build_type || 'release' }}-apk-SEA
+          name: Paperclip-${{ inputs.app_id || 'default' }}-${{ inputs.build_type || 'release' }}-apk
           path: _app/android/${{ env.APK }}
           if-no-files-found: error
           retention-days: 30
