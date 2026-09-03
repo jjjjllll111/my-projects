@@ -1,5 +1,5 @@
-# Build Paperclip Android APK with SEA (Node.js ARM64 ELF)
-# Caches: Termux node binary, shared libs, SEA blob — only rebuilds when upstream changes
+# Build Paperclip Android APK with SEA (Bionic Native Node.js ARM64 ELF)
+# v2 架构: NDK 29 -> Bionic ELF node -> SEA注入 -> jniLibs/assets 双路Stage -> 自动签名
 name: Build Paperclip APK
 
 on:
@@ -21,14 +21,32 @@ on:
         description: "Force rebuild SEA (ignore cache)"
         required: false
         default: "false"
+      app_id:
+        description: "Android applicationId for parallel install (e.g. com.paperclip.lab)"
+        required: false
+        default: ""
+      app_name:
+        description: "App display name override"
+        required: false
+        default: ""
+      app_version_name:
+        description: "versionName override"
+        required: false
+        default: ""
+      app_version_code:
+        description: "versionCode override"
+        required: false
+        default: ""
   push:
     branches: [main]
     paths: [".github/workflows/paperclip-app.yml"]
 
-permissions: { contents: write }
+permissions:
+  contents: write
+
 concurrency:
   group: paperclip-apk-${{ inputs.paperclip_app_ref || 'main' }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -38,10 +56,12 @@ jobs:
       NODE_OPTIONS: --max-old-space-size=8192
       NPM_CONFIG_AUDIT: "false"
       NPM_CONFIG_FUND: "false"
+      NPM_CONFIG_LOGLEVEL: error
     steps:
       # ── Checkout ─────────────────────────────────────────────
       - uses: actions/checkout@v4
-        with: { fetch-depth: 1 }
+        with:
+          fetch-depth: 1
 
       - name: Checkout paperclip-app
         uses: actions/checkout@v4
@@ -61,51 +81,39 @@ jobs:
           path: _paperclip
           fetch-depth: 1
 
-      # ── Setup latest tools ──────────────────────────────────
+      # ── Setup SDK & Tools (v2 Standard) ──────────────────────
       - uses: actions/setup-node@v4
-        with: { node-version: 22 }
+        with:
+          node-version: 22
 
       - run: corepack enable || true
 
       - uses: pnpm/action-setup@v4
-        with: { version: 9, run_install: false }
+        with:
+          version: 9
+          run_install: false
 
-      - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: "25" }
+      - name: Setup JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: gradle
 
-      - uses: android-actions/setup-android@v3
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
       - name: Install NDK + platforms
         run: |
-          sdkmanager --install "ndk;29.0.14206865" "platforms;android-36" "build-tools;35.0.0" "platform-tools"
+          set -euo pipefail
+          sdkmanager --install "ndk;29.0.14206865" "platforms;android-36" "build-tools;36.0.0" "platform-tools"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
-
-      # ── Cache: Termux node + shared libs ────────────────────
-      - name: Cache SEA dependencies
-        id: cache-sea
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ runner.temp }}/sea-host
-            ${{ runner.temp }}/termux-libs
-          key: sea-deps-v1-${{ hashFiles('.github/workflows/paperclip-app.yml') }}
-          restore-keys: |
-            sea-deps-v1-
-
-      # ── Cache: SEA blob ─────────────────────────────────────
-      - name: Cache SEA blob
-        id: cache-blob
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/sea-prep.blob
-          key: sea-blob-v1-${{ hashFiles('.github/workflows/paperclip-app.yml') }}
-          restore-keys: |
-            sea-blob-v1-
 
       # ── Build Paperclip UI ──────────────────────────────────
       - name: Build Paperclip UI
         working-directory: _paperclip
         run: |
+          set -euo pipefail
           pnpm install --no-frozen-lockfile
           cd ui && pnpm build
           find dist -name "*.map" -delete 2>/dev/null || true
@@ -121,19 +129,20 @@ jobs:
           cp -a _paperclip/ui/dist/. "$ASSETS/"
           echo "Assets: $(du -sh "$ASSETS" | cut -f1) files=$(find "$ASSETS" -type f | wc -l)"
 
-      # ── Extract Termux Node.js (cached) ─────────────────────
-      - name: Extract Termux Node.js ARM64
-        if: steps.cache-sea.outputs.cache-hit != 'true' || inputs.force_rebuild == 'true'
+      # ── Extract Clean Bionic Node Runtime (v2 standard) ───────
+      - name: Extract Bionic Node.js ARM64 & Native Dependencies
         run: |
           set -euo pipefail
           TMP="$RUNNER_TEMP/termux-node"
           rm -rf "$TMP"
-          mkdir -p "$TMP/nex" "$TMP/libs"
+          mkdir -p "$TMP/nex" "$TMP/libs" "$TMP/agg"
 
           PKGINDEX="$TMP/Packages"
           curl -fsSL https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages -o "$PKGINDEX"
 
-          pkg_file() { awk -v RS= -v FS='\n' -v pat="^Package: $1\$" '$1 ~ pat { for (i=1;i<=NF;i++) if ($i ~ /^Filename:/) { sub(/^Filename: /,"",$i); print $i; exit } }' "$PKGINDEX"; }
+          pkg_file() {
+            awk -v RS= -v FS='\n' -v pkg="$1" '$1 == ("Package: " pkg) { for (i=1;i<=NF;i++) if ($i ~ /^Filename:/) { sub(/^Filename: /,"",$i); print $i; exit } }' "$PKGINDEX"
+          }
           expand_deb() { local deb="$1" dest="$2"; local tmp; tmp=$(mktemp -d); (cd "$tmp" && ar x "$deb" && tar -xf data.tar.* -C "$dest"); rm -rf "$tmp"; }
 
           NF=$(pkg_file nodejs)
@@ -149,65 +158,141 @@ jobs:
           chmod +x "$RUNNER_TEMP/sea-host/node-bionic"
           file "$RUNNER_TEMP/sea-host/node-bionic"
 
-          DEPS="zlib c-ares libsqlite libffi openssl libicu libc++ libandroid-shmem libandroid-spawn"
-          AGG="$RUNNER_TEMP/termux-libs"
-          mkdir -p "$AGG"
+          DEPS="zlib c-ares libsqlite libffi openssl libicu libc++ libandroid-shmem libandroid-spawn jemalloc"
+          AGG="$TMP/agg"
           for pkg in $DEPS; do
             F=$(pkg_file "$pkg" || true)
-            [ -z "$F" ] && continue
+            [ -z "$F" ] && { echo "::warning::pkg $pkg not found"; continue; }
             curl -fsSL "https://packages.termux.dev/apt/termux-main/$F" -o "$TMP/$pkg.deb" || continue
             mkdir -p "$TMP/libs/$pkg"
             expand_deb "$TMP/$pkg.deb" "$TMP/libs/$pkg"
           done
-          find "$TMP/libs" -type f -name "*.so*" -not -path "*/_agg/*" | while read -r f; do cp -n "$f" "$AGG"/ 2>/dev/null || cp "$f" "$AGG"/; done
+
+          find "$TMP/libs" -type f -name "*.so*" -not -path "*/agg/*" | while read -r f; do cp -n "$f" "$AGG"/ 2>/dev/null || cp "$f" "$AGG"/; done
           find "$TMP/nex" -type f -name "*.so*" | while read -r f; do cp -n "$f" "$AGG"/ 2>/dev/null || true; done
+
+          # Handle versioned symlinks
+          find "$TMP/libs" "$TMP/nex" -type l -name "*.so*" 2>/dev/null | while read -r l; do
+            t=$(readlink -f "$l" 2>/dev/null || readlink "$l" 2>/dev/null || true)
+            [ -f "$t" ] && cp -n "$t" "$AGG/$(basename "$l")" 2>/dev/null || true
+            [ -f "$t" ] && cp -n "$t" "$AGG/$(basename "$t")" 2>/dev/null || true
+          done
+
+          # Fallback check for libc++_shared.so
           if [ ! -f "$AGG/libc++_shared.so" ]; then
             for f in "$AGG"/libc*.so* "$AGG"/*c++*.so*; do
               [ -f "$f" ] || continue
               if file "$f" 2>&1 | grep -qi "shared object"; then cp -a "$f" "$AGG/libc++_shared.so"; break; fi
             done
           fi
-          rm -f "$AGG"/libc.so* "$AGG"/libm.so* "$AGG"/libdl.so* || true
-          # Keep libz.so* for myapp NEEDED libz.so.1
-          echo "SEA deps cached: node=$(ls -lh "$RUNNER_TEMP/sea-host/node-bionic" | awk '{print $5}') libs=$(ls "$AGG" | wc -l)"
 
-      # ── Build SEA binary (cached) ───────────────────────────
-      - name: Build SEA binary
-        if: steps.cache-blob.outputs.cache-hit != 'true' || inputs.force_rebuild == 'true'
+          # Strip Android system overlapping symbols, preserve versioned sonames
+          rm -f "$AGG"/libc.so* "$AGG"/libm.so* "$AGG"/libdl.so* || true
+          rm -f "$AGG"/libz.so || true
+          rm -f "$AGG"/libcrypto.so "$AGG"/libssl.so || true
+          test -f "$AGG/libz.so.1" || cp -a "$TMP/libs/zlib"/*libz.so.1* "$AGG/libz.so.1" 2>/dev/null || true
+          test -f "$AGG/libcrypto.so.3" || cp -a "$TMP/libs/openssl"/*libcrypto.so.3* "$AGG/libcrypto.so.3" 2>/dev/null || true
+          test -f "$AGG/libssl.so.3" || cp -a "$TMP/libs/openssl"/*libssl.so.3* "$AGG/libssl.so.3" 2>/dev/null || true
+
+          mkdir -p "$RUNNER_TEMP/sea-libs"
+          cp -a "$AGG"/* "$RUNNER_TEMP/sea-libs"/ 2>/dev/null || true
+          echo "Bionic dependencies ready: $(ls "$RUNNER_TEMP/sea-libs" | wc -l) files"
+
+      # ── Build SEA Binary with CodeCache ──────────────────────
+      - name: Build SEA Binary
         run: |
           set -euo pipefail
 
           cat > "$RUNNER_TEMP/sea-entry.js" << 'SEA_EOF'
-          const fs = require("fs");
-          const path = require("path");
-          const serverPath = path.join(__dirname, "server.js");
-          if (fs.existsSync(serverPath)) { require(serverPath); }
-          else { console.error("server.js not found"); process.exit(1); }
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const serverCandidates = [
+            path.join(__dirname, "server.js"),
+            path.join(process.cwd(), "server.js"),
+            "./server.js"
+          ];
+          let entry = null;
+          for (const c of serverCandidates) {
+            try {
+              const p = path.resolve(c);
+              if (fs.existsSync(p)) { entry = p; break; }
+            } catch {}
+          }
+          if (!entry) {
+            console.error("SEA: server.js not found in candidates", serverCandidates);
+            process.exit(1);
+          }
+          console.log("SEA Paperclip bootstrap ->", entry, "execPath=", process.execPath);
+          require(entry);
           SEA_EOF
 
           cat > "$RUNNER_TEMP/server.js" << 'SVR_EOF'
-          const http = require("http");
-          const fs = require("fs");
-          const path = require("path");
+          const http = require("node:http");
+          const fs = require("node:fs");
+          const path = require("node:path");
           const PORT = parseInt(process.env.PORT || "3100", 10);
-          const ASSETS_DIR = path.join(__dirname, "ui-dist");
-          const MIME = {".html":"text/html; charset=utf-8",".js":"application/javascript; charset=utf-8",".css":"text/css; charset=utf-8",".json":"application/json; charset=utf-8",".png":"image/png",".svg":"image/svg+xml",".ico":"image/x-icon"};
-          const API = {"/api/health":()=>({status:"ok",timestamp:Date.now()}),"/api/status":()=>({ok:true,port:PORT,mode:"standalone"})};
-          http.createServer((req,res)=>{
-            const url=new URL(req.url,`http://localhost:${PORT}`);
-            res.setHeader("Access-Control-Allow-Origin","*");
-            if(req.method==="OPTIONS"){res.writeHead(204);return res.end();}
-            if(API[url.pathname]){res.writeHead(200,{"Content-Type":"application/json"});return res.end(JSON.stringify(API[url.pathname]()));}
-            let fp=path.join(ASSETS_DIR,url.pathname==="/"?"index.html":url.pathname);
-            if(!fs.existsSync(fp)||fs.statSync(fp).isDirectory())fp=path.join(ASSETS_DIR,"index.html");
-            if(!fs.existsSync(fp)){res.writeHead(404);return res.end("Not Found");}
-            try{const c=require("fs").readFileSync(fp);res.writeHead(200,{"Content-Type":MIME[path.extname(fp).toLowerCase()]||"application/octet-stream"});res.end(c);}
-            catch(e){res.writeHead(500);res.end("Error");}
-          }).listen(PORT,"0.0.0.0",()=>console.log(`Paperclip on http://0.0.0.0:${PORT}`));
+          const candidates = [
+            path.join(__dirname, "ui-dist"),
+            path.join(__dirname, "assets", "ui-dist"),
+            path.join(process.cwd(), "ui-dist"),
+            "./ui-dist"
+          ];
+          let ASSETS_DIR = candidates[0];
+          for (const c of candidates) {
+            if (fs.existsSync(c)) { ASSETS_DIR = c; break; }
+          }
+          const MIME = {
+            ".html": "text/html; charset=utf-8",
+            ".js": "application/javascript; charset=utf-8",
+            ".css": "text/css; charset=utf-8",
+            ".json": "application/json; charset=utf-8",
+            ".png": "image/png",
+            ".svg": "image/svg+xml",
+            ".ico": "image/x-icon",
+            ".woff": "font/woff",
+            ".woff2": "font/woff2"
+          };
+          const API = {
+            "/api/health": () => ({ status: "ok", timestamp: Date.now() }),
+            "/api/status": () => ({ ok: true, port: PORT, mode: "standalone", service: "paperclip" })
+          };
+
+          http.createServer((req, res) => {
+            const url = new URL(req.url, `http://localhost:${PORT}`);
+            res.setHeader("Access-Control-Allow-Origin", "*");
+            res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+            res.setHeader("Access-Control-Allow-Headers", "*");
+            if (req.method === "OPTIONS") { res.writeHead(204); return res.end(); }
+            if (API[url.pathname]) {
+              res.writeHead(200, { "Content-Type": "application/json" });
+              return res.end(JSON.stringify(API[url.pathname]()));
+            }
+            let fp = path.join(ASSETS_DIR, url.pathname === "/" ? "index.html" : url.pathname);
+            if (!fs.existsSync(fp) || fs.statSync(fp).isDirectory()) {
+              fp = path.join(ASSETS_DIR, "index.html");
+            }
+            if (!fs.existsSync(fp)) { res.writeHead(404); return res.end("Not Found"); }
+            try {
+              const c = fs.readFileSync(fp);
+              res.writeHead(200, { "Content-Type": MIME[path.extname(fp).toLowerCase()] || "application/octet-stream" });
+              res.end(c);
+            } catch (e) {
+              res.writeHead(500); res.end("Error");
+            }
+          }).listen(PORT, "0.0.0.0", () => console.log(`Paperclip on http://0.0.0.0:${PORT} (assets: ${ASSETS_DIR})`));
           SVR_EOF
 
+          USE_CODECACHE="true"
+          if [ "${{ inputs.build_type }}" = "debug" ]; then USE_CODECACHE="false"; fi
+
           cat > "$RUNNER_TEMP/sea-config.json" << SEA_JSON
-          {"main":"$RUNNER_TEMP/sea-entry.js","output":"$RUNNER_TEMP/sea-prep.blob","disableExperimentalSEAWarning":true,"useSnapshot":false,"useCodeCache":false}
+          {
+            "main": "$RUNNER_TEMP/sea-entry.js",
+            "output": "$RUNNER_TEMP/sea-prep.blob",
+            "disableExperimentalSEAWarning": true,
+            "useSnapshot": false,
+            "useCodeCache": $USE_CODECACHE
+          }
           SEA_JSON
 
           node --experimental-sea-config "$RUNNER_TEMP/sea-config.json"
@@ -222,90 +307,101 @@ jobs:
           file "$RUNNER_TEMP/myapp"
           ls -lh "$RUNNER_TEMP/myapp"
 
-      # ── Stage SEA assets ────────────────────────────────────
-      - name: Stage SEA assets for APK
+      # ── Stage Full Dual-Path Assets & JNI Promotion (v2 standard) ─
+      - name: Stage clean runtime assets and promote jniLibs with DT_RUNPATH
         run: |
           set -euo pipefail
-          DEST=_app/android/app/src/main/assets
-          rm -rf "$DEST/myapp-dir" "$DEST/node-libs"
-          mkdir -p "$DEST/myapp-dir" "$DEST/node-libs"
+          sudo apt-get update -qq && sudo apt-get install -y -qq patchelf
+          STRIP="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          test -x "$STRIP" || STRIP="llvm-strip"
 
-          cp "$RUNNER_TEMP/myapp" "$DEST/myapp-dir/myapp"
-          chmod +x "$DEST/myapp-dir/myapp"
-          # Also stage to jniLibs for nativeLibraryDir exec (vivo noexec on filesDir)
+          DEST="_app/android/app/src/main/assets"
+          mkdir -p "$DEST/myapp-dir" "$DEST/node-libs"
           mkdir -p _app/android/app/src/main/jniLibs/arm64-v8a
-          cp "$RUNNER_TEMP/myapp" _app/android/app/src/main/jniLibs/arm64-v8a/libmyapp.so
+
+          # 1. Stage assets for fallback
+          cp "$RUNNER_TEMP/myapp" "$DEST/myapp-dir/myapp"
+          cp "$RUNNER_TEMP/myapp" "$DEST/node-bionic"
+          chmod +x "$DEST/myapp-dir/myapp" "$DEST/node-bionic"
           cp "$RUNNER_TEMP/server.js" "$DEST/myapp-dir/"
           cp -a _paperclip/ui/dist "$DEST/myapp-dir/ui-dist"
-          cp -a "$RUNNER_TEMP/termux-libs"/* "$DEST/node-libs/" 2>/dev/null || true
+          cp -a "$RUNNER_TEMP/sea-libs"/* "$DEST/node-libs/" 2>/dev/null || true
 
-          echo "myapp: $(du -sh "$DEST/myapp-dir/myapp" | cut -f1)"
-          echo "node-libs: $(ls "$DEST/node-libs" | wc -l) files $(du -sh "$DEST/node-libs" | cut -f1)"
-          echo "ui-dist: $(du -sh "$DEST/myapp-dir/ui-dist" | cut -f1)"
+          # 2. Embed strict DT_RUNPATH on executables
+          patchelf --set-rpath '$ORIGIN/node-libs:$ORIGIN:../node-libs' "$DEST/myapp-dir/myapp" 2>/dev/null || true
+          patchelf --set-rpath '$ORIGIN/node-libs:$ORIGIN:../node-libs' "$DEST/node-bionic" 2>/dev/null || true
 
-      - name: Strip native libs
-        run: |
-          set -euo pipefail
-          STRIP="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
-          for f in _app/android/app/src/main/assets/node-libs/*.so*; do
-            [ -f "$f" ] || continue
-            "$STRIP" --strip-all --strip-unneeded "$f" 2>/dev/null || true
+          # 3. Promote ALL native shared libs & binary to jniLibs for nativeLibraryDir execution (vivo/oppo fix)
+          cp -a "$RUNNER_TEMP/sea-libs"/* _app/android/app/src/main/jniLibs/arm64-v8a/ 2>/dev/null || true
+          cp -a "$RUNNER_TEMP/myapp" _app/android/app/src/main/jniLibs/arm64-v8a/libmyapp.so
+          cp -a "$RUNNER_TEMP/myapp" _app/android/app/src/main/jniLibs/arm64-v8a/libnode_bin.so
+          cp -a "$RUNNER_TEMP/myapp" _app/android/app/src/main/jniLibs/arm64-v8a/libnode.so
+          chmod +x _app/android/app/src/main/jniLibs/arm64-v8a/*.so
+
+          # 4. Strip debug comments safely
+          "$STRIP" --strip-unneeded --remove-section=.comment "$DEST/myapp-dir/myapp" 2>/dev/null || true
+          for f in "$DEST/node-libs"/*.so* _app/android/app/src/main/jniLibs/arm64-v8a/*.so*; do
+            [ -f "$f" ] && "$STRIP" --strip-unneeded --remove-section=.comment "$f" 2>/dev/null || true
           done
-          echo "Stripped: $(du -sh _app/android/app/src/main/assets/node-libs | cut -f1)"
 
-      # ── Build APK ──────────────────────────────────────────
-      - name: Build APK
+          echo "myapp size: $(du -sh "$DEST/myapp-dir/myapp" | cut -f1)"
+          echo "node-libs staged: $(ls "$DEST/node-libs" | wc -l) files"
+          echo "jniLibs promoted: $(ls _app/android/app/src/main/jniLibs/arm64-v8a | wc -l) files"
+          echo "ui-dist staged: $(du -sh "$DEST/myapp-dir/ui-dist" | cut -f1)"
+
+      # ── Build & Sign APK (v2 Gradle Standard) ────────────────
+      - name: Build APK (Gradle)
         working-directory: _app/android
         run: |
           set -euo pipefail
+          GRADLE_APP_ARGS=()
+          if [ -n "${{ inputs.app_id }}" ]; then GRADLE_APP_ARGS+=("-PAPP_ID=${{ inputs.app_id }}"); echo "APP_ID=${{ inputs.app_id }}"; fi
+          if [ -n "${{ inputs.app_name }}" ]; then GRADLE_APP_ARGS+=("-PAPP_NAME=${{ inputs.app_name }}"); fi
+          if [ -n "${{ inputs.app_version_name }}" ]; then GRADLE_APP_ARGS+=("-PAPP_VERSION_NAME=${{ inputs.app_version_name }}"); fi
+          if [ -n "${{ inputs.app_version_code }}" ]; then GRADLE_APP_ARGS+=("-PAPP_VERSION_CODE=${{ inputs.app_version_code }}"); fi
+          echo "GRADLE_APP_ARGS=${GRADLE_APP_ARGS[*]}"
+
           chmod +x gradlew 2>/dev/null || true
-          if ! ./gradlew --version 2>/dev/null; then
-            curl -fsSL -o /tmp/gradle.zip "https://services.gradle.org/distributions/gradle-9.7.1-bin.zip"
-            cd /tmp && unzip -qo gradle.zip && export PATH=/tmp/gradle-9.7.1/bin:$PATH
-          fi
-          gradle --version | head -3
           if [ "${{ inputs.build_type }}" = "debug" ]; then
-            gradle :app:assembleDebug --stacktrace --no-daemon
+            ./gradlew :app:assembleDebug --stacktrace "${GRADLE_APP_ARGS[@]}"
+            APK="app/build/outputs/apk/debug/app-debug.apk"
           else
-            gradle :app:assembleRelease --stacktrace --no-daemon
+            ./gradlew :app:assembleRelease --stacktrace "${GRADLE_APP_ARGS[@]}"
             KEYSTORE="$RUNNER_TEMP/paperclip.keystore"
             keytool -genkeypair -v -keystore "$KEYSTORE" -alias paperclip -keyalg RSA -keysize 2048 -validity 10000 -storepass paperclip -keypass paperclip -dname "CN=Paperclip,OU=CI,O=Paperclip,L=Local,ST=Local,C=CN"
             UNSIGNED="app/build/outputs/apk/release/app-release-unsigned.apk"
             SIGNED="app/build/outputs/apk/release/app-release-signed.apk"
-            "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign --ks "$KEYSTORE" --ks-pass pass:paperclip --key-pass pass:paperclip --out "$SIGNED" "$UNSIGNED"
-            cp "$SIGNED" "app/build/outputs/apk/release/app-release.apk"
+            APK_SIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+            test -x "$APK_SIGNER" || APK_SIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+            test -x "$APK_SIGNER" || APK_SIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | head -1)"
+            "$APK_SIGNER" sign --ks "$KEYSTORE" --ks-pass pass:paperclip --key-pass pass:paperclip --out "$SIGNED" "$UNSIGNED"
+            APK="$SIGNED"
           fi
-          echo "=== APK ==="
-          find app/build/outputs/apk -name "*.apk" -exec ls -lh {} \;
+          echo "APK=$APK" >> "$GITHUB_ENV"
+          ls -lh "$APK"; du -sh "$APK"
 
-      - name: Verify APK
+      # ── Verify APK ──────────────────────────────────────────
+      - name: Verify APK (STRICT SEA)
         run: |
-          APK=$(find _app/android/app/build/outputs/apk -name "*.apk" -not -name "*unsigned*" | head -1)
-          [ -z "$APK" ] && APK=$(find _app/android/app/build/outputs/apk -name "*.apk" | head -1)
-          echo "APK: $APK"
+          set -euo pipefail
+          APK="_app/android/${{ env.APK }}"
+          echo "=== Verify APK Contents: $APK ==="
           ls -lh "$APK"
-          echo "=== Contents ==="
-          unzip -l "$APK" | grep -E "myapp|node-libs|ui-dist|assets/index" | head -20
-          echo "APK_PATH=$APK" >> "$GITHUB_ENV"
+          unzip -l "$APK" | grep -E "libmyapp|libnode|ui-dist|node-libs" | head -40 || true
+          if ! unzip -l "$APK" | grep -q "lib/arm64-v8a/libmyapp.so"; then
+            echo "::error::STRICT: lib/arm64-v8a/libmyapp.so missing in APK"; exit 1;
+          fi
+          if ! unzip -l "$APK" | grep -q "assets/ui-dist/index.html\|assets/myapp-dir/ui-dist/index.html"; then
+            echo "::error::STRICT: UI dist index.html missing in APK"; exit 1;
+          fi
+          echo "APK Verification PASS!"
 
-      # ── Upload + Release ────────────────────────────────────
-      - uses: actions/upload-artifact@v4
+      # ── Upload Artifact ─────────────────────────────────────
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: Paperclip-${{ inputs.build_type || 'release' }}-apk-SEA
-          path: _app/android/app/build/outputs/apk/**/*.apk
+          name: Paperclip-${{ inputs.app_id || 'default' }}-${{ inputs.build_type || 'release' }}-apk-SEA
+          path: _app/android/${{ env.APK }}
           if-no-files-found: error
           retention-days: 30
-
-      - name: Create Release
-        if: inputs.build_type == 'release' && github.ref == 'refs/heads/main'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: paperclip-apk-${{ github.run_number }}
-          name: Paperclip APK SEA #${{ github.run_number }}
-          files: _app/android/app/build/outputs/apk/**/*.apk
-          draft: false
-          prerelease: true
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
