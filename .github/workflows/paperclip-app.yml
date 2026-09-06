@@ -165,12 +165,18 @@ jobs:
           test -f "$RUNNER_TEMP/pc-deploy/dist/index.js" || { echo "FATAL: deploy entry missing"; ls "$RUNNER_TEMP/pc-deploy" | head -30; exit 1; }
           echo "deploy: $(du -sh "$RUNNER_TEMP/pc-deploy" | cut -f1) files=$(find "$RUNNER_TEMP/pc-deploy" -type f | wc -l)"
 
-      - name: Prune glibc natives from paperclip deploy (strict)
+      - name: Prune paperclip deploy below APK 64K zip-entry limit (strict)
         run: |
           set -euo pipefail
           DEPLOY="$RUNNER_TEMP/pc-deploy"
           rm -rf "$DEPLOY/node_modules/sharp" "$DEPLOY/node_modules/@img" 2>/dev/null || true
-          find "$DEPLOY/node_modules" \( -name "*.map" -o -name "*.d.ts" -o -name "*.md" \) -delete 2>/dev/null || true
+          find "$DEPLOY/node_modules" \( -name "*.map" -o -name "*.d.ts" -o -name "*.d.mts" -o -name "*.d.cts" -o -name "*.md" -o -name "*.markdown" -o -name "*.tsbuildinfo" -o -name "*.tgz" -o -name "LICENSE*" -o -name "CHANGELOG*" \) -delete 2>/dev/null || true
+          for d in test tests __tests__ __mocks__ __fixtures__ coverage .nyc_output .github .circleci .git .husky .vscode .idea .cache docs doc example examples samples benchmark benchmarks; do
+            find "$DEPLOY/node_modules" -type d -name "$d" -prune -exec rm -rf {} + 2>/dev/null || true
+          done
+          rm -rf "$DEPLOY/node_modules/typescript" "$DEPLOY/node_modules/vitest" "$DEPLOY/node_modules/vite" "$DEPLOY/node_modules/@vitest" "$DEPLOY/node_modules/playwright" "$DEPLOY/node_modules/playwright-core" "$DEPLOY/node_modules/.pnpm-store" 2>/dev/null || true
+          echo "zip entries: $(find "$DEPLOY" -type f | wc -l) (APK MAX=65535)"
+          [ "$(find "$DEPLOY" -type f | wc -l)" -lt 50000 ] || { echo "::error::STRICT paperclip deploy still over zip budget"; exit 1; }
           test -f "$DEPLOY/dist/index.js" || { echo "::error::STRICT paperclip deploy entry missing"; exit 1; }
           if grep -rE "require\(['\"]sharp['\"]\)|from ['\"]sharp['\"]" "$DEPLOY/dist" 2>/dev/null | head -5; then echo "::warning::sharp statically imported — may fail on bionic at runtime"; else echo "no static sharp import in dist"; fi
           echo "pruned deploy: $(du -sh "$DEPLOY" | cut -f1)"
