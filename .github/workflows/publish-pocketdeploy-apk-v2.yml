@@ -490,7 +490,8 @@ jobs:
             awk -v RS= -v FS='\n' -v pkg="$1" '$1 == ("Package: " pkg) { for(i=1;i<=NF;i++) if($i ~ /^Filename:/){ sub(/^Filename: /,"",$i); print $i; exit } }' "$PKGINDEX"
           }
           py_expand_deb() { local deb="$1" dest="$2"; local tmp; tmp=$(mktemp -d); (cd "$tmp" && ar x "$deb" && tar -xf data.tar.* -C "$dest"); rm -rf "$tmp"; }
-          for pkg in python libpython openssl libffi readline libsqlite zlib libicu libc++ libandroid-shmem; do F=$(py_pkg_file "$pkg" || true); [ -z "$F" ] && { echo "::error::STRICT python prebuilt failed: pkg $pkg not found in Termux index"; exit 1; }; echo "fetch python-dep $pkg -> $F"; curl -fsSL "https://packages.termux.dev/apt/termux-main/$F" -o "$PY_TMP/$pkg.deb" || { echo "::error::STRICT python prebuilt failed: fetch $pkg failed"; exit 1; }; mkdir -p "$PY_TMP/libs/$pkg"; py_expand_deb "$PY_TMP/$pkg.deb" "$PY_TMP/libs/$pkg"; done
+          for pkg in python openssl libffi readline libsqlite zlib libicu libc++ libandroid-shmem; do F=$(py_pkg_file "$pkg" || true); [ -z "$F" ] && { echo "::error::STRICT python prebuilt failed: pkg $pkg not found in Termux index"; exit 1; }; echo "fetch python-dep $pkg -> $F"; curl -fsSL "https://packages.termux.dev/apt/termux-main/$F" -o "$PY_TMP/$pkg.deb" || { echo "::error::STRICT python prebuilt failed: fetch $pkg failed"; exit 1; }; mkdir -p "$PY_TMP/libs/$pkg"; py_expand_deb "$PY_TMP/$pkg.deb" "$PY_TMP/libs/$pkg"; done
+          # NOTE: no separate `libpython` deb in termux-main (lib ships inside `python` deb) — verified below instead of fetched
           PY_DEST="android/app/src/main/assets/headroom/python"; rm -rf "$PY_DEST"; mkdir -p "$PY_DEST"
           if [ -d "$PY_TMP/libs/python/data/data/com.termux/files/usr" ]; then cp -a "$PY_TMP/libs/python/data/data/com.termux/files/usr/." "$PY_DEST"/; echo "python usr staged"; else echo "::error::STRICT python prebuilt failed: termux usr tree missing"; exit 1; fi
           for d in "$PY_TMP/libs"/*; do [ -d "$d" ] || continue; find "$d" -type f -name "*.so*" | while read -r so; do cp -n "$so" "$PY_DEST/lib"/ 2>/dev/null || (mkdir -p "$PY_DEST/lib" && cp -n "$so" "$PY_DEST/lib"/); done; done
@@ -500,6 +501,7 @@ jobs:
           test -x "$PY_DEST/bin/python3" || { echo "::error::STRICT python prebuilt failed: $PY_DEST/bin/python3 missing/not executable"; ls -R "$PY_DEST" | head -50; exit 1; }
           file "$PY_DEST/bin/python3" | tee /tmp/pyfile || true
           file "$PY_DEST/bin/python3" | grep -qi "aarch64" || { echo "::error::STRICT python prebuilt failed: bin/python3 is not AArch64 ELF"; exit 1; }
+          find "$PY_DEST" -name "libpython*.so*" | grep -q . || { echo "::error::STRICT python prebuilt failed: libpython .so missing in closure"; exit 1; }
           echo "STRICT python prebuilt ok: $(du -sh "$PY_DEST" | cut -f1) files=$(find "$PY_DEST" -type f | wc -l)"
 
       - name: Verify APK pre-flight (STRICT SEA — fail fast, no fallback)
