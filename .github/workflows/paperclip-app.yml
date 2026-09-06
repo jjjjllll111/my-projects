@@ -18,10 +18,6 @@ on:
         description: Skeleton project to run (lab2 runs paperclip)
         required: false
         default: paperclip
-      project:
-        description: Skeleton project to run (lab2 runs paperclip)
-        required: false
-        default: paperclip
       build_type:
         description: debug or release
         required: false
