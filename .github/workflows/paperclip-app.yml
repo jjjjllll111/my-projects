@@ -10,18 +10,26 @@ on:
         description: PocketDeploy branch/ref to build
         required: false
         default: main
-      nine_router_ref:
-        description: Branch/ref of 9router-private to build
+      paperclip_ref:
+        description: Branch/ref of paperclipai/paperclip to package (lab2 serves paperclip)
         required: false
         default: master
+      project:
+        description: Skeleton project to run (lab2 runs paperclip)
+        required: false
+        default: paperclip
+      project:
+        description: Skeleton project to run (lab2 runs paperclip)
+        required: false
+        default: paperclip
       build_type:
         description: debug or release
         required: false
         default: release
       bake_models:
-        description: Bake all models (llmlingua-2 + kompress-v2 + ORT wasm, full offline)
+        description: Bake all models (9router-only; paperclip lab2 keeps false)
         required: false
-        default: "true"
+        default: "false"
       build_node_from_source:
         description: Build Node.js from source via NDK (slow, else Termux prebuilt bionic ELF)
         required: false
@@ -43,7 +51,7 @@ on:
         required: false
         default: ""
       router_port:
-        description: 9router listen port for this variant (lab2 serves its own project on 3100)
+        description: Node listen port for this variant (lab2 paperclip serves on 3100)
         required: false
         default: "3100"
       peer_app_ids:
@@ -85,21 +93,35 @@ jobs:
           token: ${{ secrets.GH_PAT }}
           fetch-depth: 1
 
-      - name: Checkout 9router-private
+      - name: Checkout paperclipai/paperclip
         uses: actions/checkout@v4
         with:
-          repository: jjjjllll111/9router-private
-          ref: ${{ inputs.nine_router_ref || 'master' }}
-          token: ${{ secrets.GH_PAT }}
-          path: _9router
+          repository: paperclipai/paperclip
+          ref: ${{ inputs.paperclip_ref || 'master' }}
+          path: _paperclip
           fetch-depth: 1
 
-      - name: Setup Node.js
+      - name: Setup Node.js 24 + pnpm
         uses: actions/setup-node@v4
         with:
-          node-version: 26
-          cache: npm
-          cache-dependency-path: _9router/package-lock.json
+          node-version: 24
+
+      - name: Enable corepack pnpm
+        run: |
+          set -euo pipefail
+          corepack enable || true
+          corepack prepare pnpm@9.15.4 --activate || npm i -g pnpm@9.15.4
+          pnpm --version
+
+      - name: Install rustup (paperclip-runner vendor build)
+        run: |
+          set -euo pipefail
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
+            sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain stable
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/cargo" --version || cargo --version
 
       - name: Setup JDK 25
         uses: actions/setup-java@v4
@@ -117,157 +139,47 @@ jobs:
           sdkmanager --install "ndk;29.0.14206865" "platforms;android-36" "build-tools;36.0.0" "platform-tools"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
 
-      - name: Install 9router deps
+      - name: Install paperclip deps
         run: |
           set -euo pipefail
-          cd _9router
-          npm ci --no-audit --no-fund || npm install --no-audit --no-fund
-          (cd cli && npm install --no-audit --no-fund) || true
+          cd _paperclip
+          pnpm install --frozen-lockfile
 
-      - name: Patch next.config externalize koffi/tls-client-node (.node webpack fix)
+      - name: Build paperclip server+UI (prepack)
         run: |
           set -euo pipefail
-          CFG=""; for f in _9router/next.config.js _9router/next.config.mjs _9router/next.config.cjs; do [ -f "$f" ] && CFG="$f" && break; done
-          if [ -n "$CFG" ]; then echo "patch $CFG"; node <<'JS'
-          import fs from "node:fs";
-          let cfg=null; for(const f of ['_9router/next.config.js','_9router/next.config.mjs','_9router/next.config.cjs']) try{if(fs.existsSync(f)){cfg=f;break}}catch{}
-          if(!cfg){console.log('no next.config');process.exit(0)}
-          let s=fs.readFileSync(cfg,'utf8');
-          if(s.includes('koffi')&&s.includes('tls-client-node')){console.log('already patched');process.exit(0)}
-          if(s.includes('serverComponentsExternalPackages')){
-            s=s.replace(/serverComponentsExternalPackages\s*:\s*\[/, 'serverComponentsExternalPackages: [\'koffi\', \'tls-client-node\', ');
-          } else if(s.includes('experimental')){
-            s=s.replace(/experimental\s*:\s*\{/, 'experimental: { serverComponentsExternalPackages: [\'koffi\',\'tls-client-node\'],');
-          } else {
-            s=s.replace(/const nextConfig\s*=\s*\{/, 'const nextConfig = {\n  experimental: { serverComponentsExternalPackages: [\'koffi\',\'tls-client-node\'] },');
-          }
-          if(!s.includes('.node')){
-            if(s.includes('webpack:')){
-              s=s.replace(/webpack\s*:\s*\(config[^)]*\)\s*=>\s*\{/, 'webpack: (config, ctx) => { const isServer = ctx && ctx.isServer; config.module = config.module||{}; config.module.rules=config.module.rules||[]; config.module.rules.push({test:/\\.node$/, loader: \'ignore-loader\'}); ');
-            } else {
-              s=s.replace(/const nextConfig\s*=\s*\{/, 'const nextConfig = {\n  webpack: (config)=>{config.module=config.module||{};config.module.rules=config.module.rules||[];config.module.rules.push({test:/\.node$/,loader:\'ignore-loader\'}); return config;},');
-            }
-          }
-          fs.writeFileSync(cfg,s); console.log('patched '+cfg);
-          JS
-          cat "$CFG" | head -80 || true
-          else echo "no next.config found skip"
-          fi
-          npm i -D ignore-loader --prefix _9router --no-audit --no-fund 2>&1 | tail -5 || true
+          cd _paperclip
+          pnpm --filter @paperclipai/server prepack
+          test -f server/dist/index.js || { echo "FATAL: server/dist/index.js missing"; exit 1; }
+          test -f server/ui-dist/index.html || { echo "FATAL: server/ui-dist/index.html missing"; exit 1; }
+          echo "paperclip built: dist=$(du -sh server/dist | cut -f1) ui=$(du -sh server/ui-dist | cut -f1)"
 
-      - name: Stub missing proxyFetch.js (9router compile hotfix)
+      - name: pnpm deploy paperclip server (prod, self-contained)
         run: |
           set -euo pipefail
-          mkdir -p _9router/utils _9router/open-sse/utils _9router/open-sse/services/utils
-          cat > _9router/utils/proxyFetch.js <<'STUB'
-          // stub for CI: proxyFetch missing in this 9router ref
-          export async function proxyFetch(url, init){ return fetch(url, init); }
-          export async function proxyAwareFetch(url, init){ return fetch(url, init); }
-          export function parseCooldown(v){ return v; }
-          export default function proxyFetchDefault(u,i){ return fetch(u,i); }
-          STUB
-          cp _9router/utils/proxyFetch.js _9router/open-sse/utils/proxyFetch.js
-          cp _9router/utils/proxyFetch.js _9router/open-sse/services/utils/proxyFetch.js 2>/dev/null || true
-          echo "stubbed proxyFetch variants"
-          cat _9router/utils/proxyFetch.js
+          cd _paperclip
+          pnpm --filter @paperclipai/server --prod deploy "$RUNNER_TEMP/pc-deploy"
+          test -f "$RUNNER_TEMP/pc-deploy/dist/index.js" || { echo "FATAL: deploy entry missing"; ls "$RUNNER_TEMP/pc-deploy" | head -30; exit 1; }
+          echo "deploy: $(du -sh "$RUNNER_TEMP/pc-deploy" | cut -f1) files=$(find "$RUNNER_TEMP/pc-deploy" -type f | wc -l)"
 
-      - name: Stub missing utils (parseCooldown, etc.) from 9router
+      - name: Prune glibc natives from paperclip deploy (strict)
         run: |
           set -euo pipefail
-          mkdir -p _9router/open-sse/utils
-          cat > _9router/open-sse/utils/index.js <<'IDX'
-          // stub: re-export all common missing utils for CI compile
-          export * from './proxyFetch.js';
-          export * from './cooldown.js';
-          IDX
-          cat > _9router/open-sse/utils/cooldown.js <<'CD'
-          // stub: parseCooldown missing in 9router ref for CI compile
-          export function parseCooldown(v){ return v; }
-          export default function parseCooldownDefault(v){ return v; }
-          CD
-          cp _9router/open-sse/utils/cooldown.js _9router/utils/cooldown.js 2>/dev/null || true
-          for p in _9router/src/utils/cooldown.js _9router/utils/cooldown.js _9router/open-sse/services/utils/cooldown.js; do
-            mkdir -p "$(dirname "$p")"
-            cp _9router/open-sse/utils/cooldown.js "$p" 2>/dev/null || true
-          done
-          echo "stub cooldown ok"
+          DEPLOY="$RUNNER_TEMP/pc-deploy"
+          rm -rf "$DEPLOY/node_modules/sharp" "$DEPLOY/node_modules/@img" 2>/dev/null || true
+          find "$DEPLOY/node_modules" \( -name "*.map" -o -name "*.d.ts" -o -name "*.md" \) -delete 2>/dev/null || true
+          test -f "$DEPLOY/dist/index.js" || { echo "::error::STRICT paperclip deploy entry missing"; exit 1; }
+          if grep -rE "require\(['\"]sharp['\"]\)|from ['\"]sharp['\"]" "$DEPLOY/dist" 2>/dev/null | head -5; then echo "::warning::sharp statically imported — may fail on bionic at runtime"; else echo "no static sharp import in dist"; fi
+          echo "pruned deploy: $(du -sh "$DEPLOY" | cut -f1)"
 
-      - name: Build 9router standalone
+      - name: Sync paperclip deploy -> android assets/paperclip
         run: |
           set -euo pipefail
-          cd _9router
-          npm run build
-          node scripts/copy-standalone-assets.mjs
-          test -f .next/standalone/server.js || test -f .next/standalone/custom-server.js || { echo "FATAL: standalone entry missing"; ls -R .next/standalone | head -40 || true; exit 1; }
-
-      - name: Bundle engine deps + models (strict, full bake)
-        run: |
-          set -euo pipefail
-          cd _9router
-          node scripts/bundle-engine-deps.mjs cli/app-engine-deps --strict
-          if [ -d cli/app-engine-deps/node_modules ]; then
-            mkdir -p cli/app/node_modules
-            cp -rn cli/app-engine-deps/node_modules/. cli/app/node_modules/ 2>/dev/null || cp -r cli/app-engine-deps/node_modules/. cli/app/node_modules/
-          fi
-          if [ "${{ inputs.bake_models }}" = "true" ]; then
-            echo "bake_models: preload llmlingua (strict, full offline)..."
-            node scripts/preload-engine-models.mjs cli/app-engine-models --strict
-            mkdir -p cli/app/engine-models
-            cp -rn cli/app-engine-models/. cli/app/engine-models/ 2>/dev/null || true
-            du -sh cli/app/engine-models || true
-          else
-            echo "skip llmlingua engine-models bake"
-            rm -rf cli/app/engine-models
-          fi
-          du -sh cli/app || true
-
-      - name: Optimize bundle (prune, strip glibc natives, seed ORT wasm)
-        run: |
-          set -euo pipefail
-          cat > "$RUNNER_TEMP/optimize-bundle.mjs" <<'OPT_EOF'
-          #!/usr/bin/env node
-          import fs from "node:fs"; import path from "node:path"; import { execFileSync } from "node:child_process"; import { createRequire } from "node:module";
-          const APP = path.resolve(process.argv[2] || "_9router/cli/app");
-          const NM = path.join(APP, "node_modules"); const MODELS = path.join(APP, "engine-models");
-          const ENGINE_SPECS = ["omniglyph","omniglyph/applicability","@huggingface/transformers","@atjsh/llmlingua-2","js-tiktoken/lite","js-tiktoken/ranks/o200k_base","smol-toml","safe-regex","tls-client-node"];
-          const GLIBC_ONLY_PKGS = ["onnxruntime-node","sharp","@img"];
-          const JUNK_DIRS = new Set(["test","tests","__tests__","__mocks__","__fixtures__","coverage",".nyc_output",".github",".circleci",".git",".husky",".vscode",".idea",".cache","docs","doc","example","examples","samples","benchmark","benchmarks"]);
-          function fmtMiB(n){return (n/1024/1024).toFixed(1)+" MiB"}
-          function walkStats(root){let f=0,b=0;const s=[root];while(s.length){const d=s.pop();let e;try{e=fs.readdirSync(d,{withFileTypes:true})}catch{continue} for(const en of e){const p=path.join(d,en.name);if(en.isDirectory())s.push(p);else{f++;try{b+=fs.statSync(p).size}catch{}}}}return{files:f,bytes:b}}
-          function smoke(spec){try{execFileSync(process.execPath,["--no-warnings","-e","Promise.resolve().then(function(){return import(process.argv[1])}).then(function(){process.exit(0)},function(e){console.error(String((e&&e.message)||e));process.exit(1)})",spec],{cwd:APP,stdio:["ignore","pipe","pipe"],timeout:90000});return true}catch{return false}}
-          function smokeAll(){const o={};for(const s of ENGINE_SPECS)o[s]=smoke(s);return o}
-          const deleted={};function cnt(k){if(!deleted[k])deleted[k]={count:0,bytes:0};return deleted[k]} function rmP(k,p){let b=0;try{b=fs.statSync(p).size??0}catch{} fs.rmSync(p,{recursive:true,force:true});const c=cnt(k);c.count++;c.bytes+=b}
-          function junkKind(n){const l=n.toLowerCase();if(l.endsWith(".map"))return"sourcemap";if(l.endsWith(".d.ts")||l.endsWith(".d.mts")||l.endsWith(".d.cts"))return"typedef";if(l.endsWith(".md")||l.endsWith(".markdown"))return"docs";if(l.endsWith(".tsbuildinfo")||l.endsWith(".log")||l.endsWith(".tgz"))return"misc";if(n===".DS_Store"||n==="Thumbs.db")return"misc";return null}
-          function prune(){const s=[NM];while(s.length){const d=s.pop();let e;try{e=fs.readdirSync(d,{withFileTypes:true})}catch{continue} for(const en of e){const p=path.join(d,en.name);if(en.isDirectory()){if(JUNK_DIRS.has(en.name))rmP("junkdir",p);else s.push(p);continue}const k=junkKind(en.name);if(k)rmP(k,p)}}}
-          function strip(){for(const n of GLIBC_ONLY_PKGS){const p=path.join(NM,n);if(fs.existsSync(p)){console.log("strip(glibc): "+n);rmP("glibc-native",p)}}}
-          function stub(){const dir=path.join(NM,"onnxruntime-node");fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,"package.json"),JSON.stringify({name:"onnxruntime-node",version:"0.0.0-stub",type:"module",main:"index.js"}));fs.writeFileSync(path.join(dir,"index.js"),['// Android stub: onnxruntime-node -> onnxruntime-web WASM','import * as ort from "onnxruntime-web";','try{const w=ort.env&&ort.env.backends&&ort.env.backends.onnx&&ort.env.backends.onnx.wasm;if(w){w.wasmPaths=new URL("../onnxruntime-web/dist/",import.meta.url).href;w.numThreads=1}}catch(e){}','const Orig=ort.InferenceSession;const oc=Orig.create.bind(Orig);','async function cw(u,o={}){const eps=Array.isArray(o.executionProviders)&&o.executionProviders.length>0?o.executionProviders:["cpu"];if(!eps.includes("xnnpack"))o={...o,executionProviders:["xnnpack",...eps]};return oc(u,o)}','const S=class extends Orig{};S.create=cw;','export {S as InferenceSession};','export * from "onnxruntime-web";'].join("\n"));console.log("stub: onnxruntime-node -> ort-web WASM XNNPACK")}
-          function seed(){try{const v=JSON.parse(fs.readFileSync(path.join(NM,"onnxruntime-web","package.json"),"utf8"));const d=path.join(NM,"onnxruntime-web","dist");const cr=path.join(APP,"engine-models");if(!fs.existsSync(cr)){console.log("seed skipped: no engine-models");return} const rel=("https://cdn.jsdelivr.net/npm/onnxruntime-web@"+v.version+"/dist/").replace("https://","https:/");const dest=path.join(cr,rel);fs.mkdirSync(dest,{recursive:true});let n=0;for(const f of fs.readdirSync(d)){if(!/\.(wasm|mjs)$/.test(f))continue;fs.copyFileSync(path.join(d,f),path.join(dest,f));n++}console.log("seed-ort-wasm: "+n+" files @"+v.version)}catch(e){console.warn("seed fail: "+String((e&&e.message)||e))}}
-          if(!fs.existsSync(NM)){console.error("missing "+NM);process.exit(2)}
-          const bef=walkStats(APP); const bs=smokeAll(); prune(); strip(); stub(); seed();
-          const aft=walkStats(APP); const as=smokeAll();
-          const reg=ENGINE_SPECS.filter(s=>bs[s]&&!as[s]);
-          console.log("\n== optimize-bundle (bionic SEA) ==\nfiles: "+bef.files+" -> "+aft.files+"\nbytes: "+fmtMiB(bef.bytes)+" -> "+fmtMiB(aft.bytes));
-          for(const [k,v] of Object.entries(deleted))console.log("  "+k+": "+v.count+" ("+fmtMiB(v.bytes)+")");
-          console.log(ENGINE_SPECS.map(s=>s+": "+(bs[s]?"✅":"❌")+"->"+(as[s]?"✅":"❌")).join("\n"));
-          if(reg.length){console.error("BROKEN: "+reg.join(","));process.exit(3)}
-          OPT_EOF
-          OPT_STRIP_GLIBC_NATIVE=1 node "$RUNNER_TEMP/optimize-bundle.mjs" _9router/cli/app
-
-      - name: Sync 9router standalone -> android assets
-        run: |
-          set -euo pipefail
-          STANDALONE="_9router/.next/standalone"
-          ASSETS="android/app/src/main/assets/9router"
+          ASSETS="android/app/src/main/assets/paperclip"
           rm -rf "$ASSETS"; mkdir -p "$ASSETS"
-          cp -a "$STANDALONE"/. "$ASSETS"/
-          if [ -d "_9router/cli/app/node_modules" ]; then mkdir -p "$ASSETS/node_modules"; cp -rn _9router/cli/app/node_modules/. "$ASSETS/node_modules"/ 2>/dev/null || cp -r _9router/cli/app/node_modules/. "$ASSETS/node_modules"/; fi
-          if [ -d "_9router/cli/app/engine-models" ] && [ "${{ inputs.bake_models }}" = "true" ]; then
-            mkdir -p "$ASSETS/engine-models"
-            cp -rn _9router/cli/app/engine-models/. "$ASSETS/engine-models"/ 2>/dev/null || true
-            echo "assets engine-models: $(du -sh "$ASSETS/engine-models" | cut -f1)"
-          fi
-          echo "assets 9router: $(du -sh "$ASSETS" | cut -f1) files=$(find "$ASSETS" -type f | wc -l)"
-          test -f "$ASSETS/server.js" || test -f "$ASSETS/custom-server.js" || { echo "FATAL: 9router entry missing"; exit 1; }
+          cp -a "$RUNNER_TEMP/pc-deploy"/. "$ASSETS"/
+          echo "assets paperclip: $(du -sh "$ASSETS" | cut -f1) files=$(find "$ASSETS" -type f | wc -l)"
+          test -f "$ASSETS/dist/index.js" || { echo "FATAL: assets/paperclip/dist/index.js missing"; exit 1; }
 
       - name: Extract bionic node closure (NDK/Bionic arm64 ELF — fast path)
         if: inputs.build_node_from_source != 'true'
@@ -281,6 +193,9 @@ jobs:
           }
           expand_deb() { local deb="$1" dest="$2"; local tmp; tmp=$(mktemp -d); (cd "$tmp" && ar x "$deb" && tar -xf data.tar.* -C "$dest"); rm -rf "$tmp"; }
           NF=$(pkg_file nodejs); [ -z "$NF" ] && { echo "FATAL: nodejs not in Packages"; exit 1; }
+          echo "termux nodejs: $NF"
+          NVER=$(echo "$NF" | grep -oP 'nodejs_\K[0-9]+' | head -1); [ -z "$NVER" ] && NVER=0
+          [ "$NVER" -ge 24 ] || { echo "::error::STRICT paperclip needs bionic node >=24 (termux has $NVER)"; exit 1; }
           curl -fsSL "https://packages.termux.dev/apt/termux-main/$NF" -o "$TMP/node.deb"
           mkdir -p "$TMP/nex"; (cd "$TMP/nex" && ar x "$TMP/node.deb" && tar -xf data.tar.*)
           NODE_BIN="$TMP/nex/data/data/com.termux/files/usr/bin/node"
@@ -382,14 +297,15 @@ jobs:
           file "$RUNNER_TEMP/sea-host/node-bionic"; readelf -d "$RUNNER_TEMP/sea-host/node-bionic" | grep NEEDED || true
           echo "Node from source built via NDK -> Bionic"
 
-      - name: Cache SEA blob (Node 26, 9router hash)
+      - name: Cache SEA blob (Node 26, paperclip hash)
         uses: actions/cache@v4
         with:
           path: |
             ${{ runner.temp }}/sea-prep.blob
             ${{ runner.temp }}/myapp
-          key: sea-${{ hashFiles('_9router/.next/standalone/**/*.js', '_9router/.next/standalone/**/*.json') }}-node26-${{ hashFiles('_9router/package-lock.json') }}
+          key: sea-paperclip-${{ hashFiles('_paperclip/server/dist/**/*.js') }}-node26
           restore-keys: |
+            sea-paperclip-
             sea-
 
       - name: Generate SEA blob + inject into Bionic ELF -> myapp
@@ -401,10 +317,10 @@ jobs:
           if readelf -d "$HOST_BIN" | grep -Eq "libc\.so\.6|GLIBC_"; then echo "FATAL: host is glibc, not bionic"; exit 1; fi
           echo "NEEDED host:"; readelf -d "$HOST_BIN" | grep NEEDED || true
 
-          WORK="_9router/cli/app"
+          WORK="$RUNNER_TEMP/pc-deploy"
           cat > "$RUNNER_TEMP/sea-entry.js" <<'SEA_ENTRY'
           const fs = require("node:fs"); const path = require("node:path");
-          const candidates = ["./custom-server.js","./server.js","./9router/custom-server.js","./9router/server.js"];
+          const candidates = ["./dist/index.js","./server/dist/index.js"];
           let entry=null; for(const c of candidates){ try{ const p=path.resolve(c); if(fs.existsSync(p)){entry=p;break} }catch{} }
           if(!entry){ console.error("SEA: no entry found", candidates.join(",")); process.exit(1) }
           console.log("SEA myapp ->", entry, "execPath=", process.execPath);
@@ -533,6 +449,7 @@ jobs:
           if [ -n "${{ inputs.router_port }}" ]; then GRADLE_APP_ARGS+=("-PROUTER_PORT=${{ inputs.router_port }}"); echo "ROUTER_PORT=${{ inputs.router_port }}"; fi
           if [ -n "${{ inputs.peer_app_ids }}" ]; then GRADLE_APP_ARGS+=("-PPEER_APP_IDS=${{ inputs.peer_app_ids }}"); fi
           if [ -n "${{ inputs.mesh_coordinator_url }}" ]; then GRADLE_APP_ARGS+=("-PMESH_COORDINATOR_URL=${{ inputs.mesh_coordinator_url }}"); fi
+          GRADLE_APP_ARGS+=("-PPROJECT=${{ inputs.project || 'paperclip' }}"); echo "PROJECT=${{ inputs.project || 'paperclip' }}"
           echo "GRADLE_APP_ARGS=${GRADLE_APP_ARGS[*]}"
           cd android
           chmod +x gradlew
@@ -573,11 +490,12 @@ jobs:
           set -euo pipefail
           APK="android/${{ env.APK }}"
           echo "=== APK contents (assets/jniLibs) ==="
-          (unzip -l "$APK" | grep -E "assets/9router|assets/headroom|assets/node-libs|lib/arm64-v8a/libmyapp|classes" | head -80 || true)
+          (unzip -l "$APK" | grep -E "assets/paperclip|assets/headroom|assets/node-libs|lib/arm64-v8a/libmyapp|classes" | head -80 || true)
           if ! unzip -l "$APK" | grep -q "lib/arm64-v8a/libmyapp.so"; then echo "::error::STRICT: lib/arm64-v8a/libmyapp.so missing in APK (SEA injection failed)"; exit 1; fi
           if unzip -l "$APK" | grep -q "assets/node-bionic"; then echo "::notice::legacy assets/node-bionic still in APK (ignored at runtime)"; fi
-          if ! unzip -l "$APK" | grep -q "assets/9router/server.js\|assets/9router/custom-server.js"; then echo "::error::assets/9router entry missing"; exit 1; fi
-          if [ "${{ inputs.bake_models }}" = "true" ] && ! unzip -l "$APK" | grep -q "assets/9router/engine-models"; then echo "::error::STRICT: engine-models not baked (offline llmlingua missing)"; exit 1; else echo "engine-models check ok"; fi
+          if ! unzip -l "$APK" | grep -q "assets/paperclip/dist/index.js"; then echo "::error::assets/paperclip/dist/index.js entry missing"; exit 1; fi
+          if ! unzip -l "$APK" | grep -q "assets/paperclip/ui-dist/index.html"; then echo "::error::assets/paperclip/ui-dist/index.html missing"; exit 1; fi
+          echo "paperclip entry+ui check ok (bake_models n/a for paperclip)"
           if ! unzip -l "$APK" | grep -q "assets/headroom/python/bin/python3"; then echo "::error::STRICT python prebuilt failed: assets/headroom/python/bin/python3 missing in APK"; exit 1; else echo "python prebuilt in APK ok"; fi
           if unzip -p "$APK" "lib/arm64-v8a/libmyapp.so" > /tmp/_apk_myapp 2>/dev/null && [ -s /tmp/_apk_myapp ]; then echo "myapp in APK:"; file /tmp/_apk_myapp | head -5 || true; readelf -h /tmp/_apk_myapp 2>&1 | head -10 || true; if ! file /tmp/_apk_myapp | grep -qi "aarch64"; then echo "::error::myapp in APK is not AArch64 ELF"; exit 1; fi; fi
           du -sh "$APK"
@@ -586,7 +504,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PocketDeploy-${{ inputs.app_id || 'default' }}-${{ inputs.build_type || 'debug' }}-apk-SEA
+          name: Paperclip-${{ inputs.app_id || 'lab2' }}-${{ inputs.build_type || 'release' }}-apk
           path: android/${{ env.APK }}
           if-no-files-found: error
           retention-days: 30
