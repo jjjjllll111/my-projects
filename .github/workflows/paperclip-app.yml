@@ -145,11 +145,10 @@ jobs:
         run: |
           set -euo pipefail
           cd _paperclip
-          # NOTE: upstream `prepack` runs preflight:typecheck which fails on master (TS7006 implicit any,
-          # not ours). Build server+UI directly; entry/ui-dist assertions below stay strict.
-          pnpm --filter @paperclipai/server run build:server
-          pnpm --filter @paperclipai/server run build:ui
-          pnpm --filter @paperclipai/server exec sh -c './scripts/prepare-server-ui-dist.sh || npm run copy-ui-dist || true'
+          # NOTE: upstream `prepack` = prepare:ui-dist + build; build runs bare `tsc` (not strict typecheck,
+          # TS7006 gate lives in `typecheck` only). Call both directly, skip postpack cleanup.
+          pnpm --filter @paperclipai/server run prepare:ui-dist
+          pnpm --filter @paperclipai/server run build
           test -f server/dist/index.js || { echo "FATAL: server/dist/index.js missing"; exit 1; }
           test -f server/ui-dist/index.html || { echo "FATAL: server/ui-dist/index.html missing"; exit 1; }
           echo "paperclip built: dist=$(du -sh server/dist | cut -f1) ui=$(du -sh server/ui-dist | cut -f1)"
