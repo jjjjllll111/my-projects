@@ -44,6 +44,18 @@ on:
         description: versionCode override
         required: false
         default: ""
+      router_port:
+        description: 9router listen port for this variant (each app serves its own project/port)
+        required: false
+        default: ""
+      peer_app_ids:
+        description: Comma-separated peer applicationIds for same-phone mutual keepalive
+        required: false
+        default: ""
+      mesh_coordinator_url:
+        description: LAN coordinator heartbeat URL (e.g. http://192.168.1.10:20128/api/mesh/heartbeat, empty=disabled)
+        required: false
+        default: ""
   push:
     branches: [main]
     paths:
@@ -520,6 +532,9 @@ jobs:
           if [ -n "${{ inputs.app_name }}" ]; then GRADLE_APP_ARGS+=("-PAPP_NAME=${{ inputs.app_name }}"); fi
           if [ -n "${{ inputs.app_version_name }}" ]; then GRADLE_APP_ARGS+=("-PAPP_VERSION_NAME=${{ inputs.app_version_name }}"); fi
           if [ -n "${{ inputs.app_version_code }}" ]; then GRADLE_APP_ARGS+=("-PAPP_VERSION_CODE=${{ inputs.app_version_code }}"); fi
+          if [ -n "${{ inputs.router_port }}" ]; then GRADLE_APP_ARGS+=("-PROUTER_PORT=${{ inputs.router_port }}"); echo "ROUTER_PORT=${{ inputs.router_port }}"; fi
+          if [ -n "${{ inputs.peer_app_ids }}" ]; then GRADLE_APP_ARGS+=("-PPEER_APP_IDS=${{ inputs.peer_app_ids }}"); fi
+          if [ -n "${{ inputs.mesh_coordinator_url }}" ]; then GRADLE_APP_ARGS+=("-PMESH_COORDINATOR_URL=${{ inputs.mesh_coordinator_url }}"); fi
           echo "GRADLE_APP_ARGS=${GRADLE_APP_ARGS[*]}"
           cd android
           chmod +x gradlew
