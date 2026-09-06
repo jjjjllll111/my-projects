@@ -1,5 +1,6 @@
-# Build PocketDeploy Lab2 APK (2nd app, same skeleton as main app)
-# lab2 = PocketDeploy 骨架 + 独立 applicationId/端口/peer 清单，与主包同机互保活。
+# Build PocketDeploy Lab2 APK (paperclip, same skeleton as v2 main app)
+# lab2 = PocketDeploy 骨架 + paperclipai/paperclip 源码自编译 + 独立包名/端口/签名，与主包同机互保活。
+# 流程与 v2 一致 (termux 预编译 node 闭包)，仅集成项目 9router -> paperclip；paperclip 保持上游自编译流程不变。
 # 例：app_id=com.pocketdeploy.lab2, router_port=3100, peers=主包+lab2
 name: Build PocketDeploy Lab2 APK (mesh keepalive variant)
 
@@ -11,7 +12,7 @@ on:
         required: false
         default: main
       paperclip_ref:
-        description: Branch/ref of paperclipai/paperclip to package (lab2 serves paperclip)
+        description: Branch/ref of paperclipai/paperclip to package (lab2 serves paperclip, self-compile)
         required: false
         default: master
       project:
@@ -31,7 +32,7 @@ on:
         required: false
         default: "false"
       app_id:
-        description: Android applicationId for parallel install (lab2 default)
+        description: Android applicationId for parallel install (lab2 default, isolated from v2)
         required: false
         default: com.pocketdeploy.lab2
       app_name:
@@ -141,7 +142,7 @@ jobs:
           cd _paperclip
           pnpm install --frozen-lockfile
 
-      - name: Build paperclip server+UI (skip upstream preflight:typecheck, upstream TS7006)
+      - name: Build paperclip server+UI (self-compile, upstream flow unchanged)
         run: |
           set -euo pipefail
           cd _paperclip
@@ -165,15 +166,30 @@ jobs:
           test -f "$RUNNER_TEMP/pc-deploy/dist/index.js" || { echo "FATAL: deploy entry missing"; ls "$RUNNER_TEMP/pc-deploy" | head -30; exit 1; }
           echo "deploy: $(du -sh "$RUNNER_TEMP/pc-deploy" | cut -f1) files=$(find "$RUNNER_TEMP/pc-deploy" -type f | wc -l)"
 
-      - name: Prune paperclip deploy below APK 64K zip-entry limit (strict)
+      - name: Prune paperclip deploy (keep zip entries well under 64K limit)
         run: |
           set -euo pipefail
+          cat > "$RUNNER_TEMP/prune-pc.mjs" <<'PRUNE_EOF'
+          #!/usr/bin/env node
+          import fs from "node:fs"; import path from "node:path";
+          const DEPLOY = path.resolve(process.env.PC_DEPLOY || "");
+          const NM = path.join(DEPLOY, "node_modules");
+          const JUNK_DIRS = new Set(["test","tests","__tests__","__mocks__","__fixtures__","coverage",".nyc_output",".github",".circleci",".git",".husky",".vscode",".idea",".cache","docs","doc","example","examples","samples","benchmark","benchmarks"]);
+          function fmtMiB(n){return (n/1024/1024).toFixed(1)+" MiB"}
+          function walkStats(root){let f=0,b=0;const s=[root];while(s.length){const d=s.pop();let e;try{e=fs.readdirSync(d,{withFileTypes:true})}catch{continue} for(const en of e){const p=path.join(d,en.name);if(en.isDirectory())s.push(p);else{f++;try{b+=fs.statSync(p).size}catch{}}}}return{files:f,bytes:b}}
+          function junkKind(n){const l=n.toLowerCase();if(l.endsWith(".map"))return"sourcemap";if(l.endsWith(".d.ts")||l.endsWith(".d.mts")||l.endsWith(".d.cts"))return"typedef";if(l.endsWith(".md")||l.endsWith(".markdown"))return"docs";if(l.endsWith(".tsbuildinfo")||l.endsWith(".log")||l.endsWith(".tgz"))return"misc";if(n===".DS_Store"||n==="Thumbs.db")return"misc";return null}
+          const deleted={};
+          function prune(root){const s=[root];while(s.length){const d=s.pop();let e;try{e=fs.readdirSync(d,{withFileTypes:true})}catch{continue} for(const en of e){const p=path.join(d,en.name);if(en.isDirectory()){if(JUNK_DIRS.has(en.name)){fs.rmSync(p,{recursive:true,force:true});deleted.junkdir=(deleted.junkdir||0)+1}else s.push(p);continue}const k=junkKind(en.name);if(k){try{fs.rmSync(p,{force:true});deleted[k]=(deleted[k]||0)+1}catch{}}}}}
+          if(!fs.existsSync(NM)){console.error("missing "+NM);process.exit(2)}
+          const bef=walkStats(DEPLOY); prune(NM);
+          const aft=walkStats(DEPLOY);
+          console.log("prune-pc: files "+bef.files+" -> "+aft.files+", bytes "+fmtMiB(bef.bytes)+" -> "+fmtMiB(aft.bytes));
+          console.log(JSON.stringify(deleted));
+          PRUNE_EOF
+          PC_DEPLOY="$RUNNER_TEMP/pc-deploy" node "$RUNNER_TEMP/prune-pc.mjs"
           DEPLOY="$RUNNER_TEMP/pc-deploy"
           rm -rf "$DEPLOY/node_modules/sharp" "$DEPLOY/node_modules/@img" 2>/dev/null || true
-          find "$DEPLOY/node_modules" \( -name "*.map" -o -name "*.d.ts" -o -name "*.d.mts" -o -name "*.d.cts" -o -name "*.md" -o -name "*.markdown" -o -name "*.tsbuildinfo" -o -name "*.tgz" -o -name "LICENSE*" -o -name "CHANGELOG*" \) -delete 2>/dev/null || true
-          for d in test tests __tests__ __mocks__ __fixtures__ coverage .nyc_output .github .circleci .git .husky .vscode .idea .cache docs doc example examples samples benchmark benchmarks; do
-            find "$DEPLOY/node_modules" -type d -name "$d" -prune -exec rm -rf {} + 2>/dev/null || true
-          done
+          find "$DEPLOY/node_modules" \( -name "LICENSE*" -o -name "CHANGELOG*" \) -delete 2>/dev/null || true
           rm -rf "$DEPLOY/node_modules/typescript" "$DEPLOY/node_modules/vitest" "$DEPLOY/node_modules/vite" "$DEPLOY/node_modules/@vitest" "$DEPLOY/node_modules/playwright" "$DEPLOY/node_modules/playwright-core" "$DEPLOY/node_modules/.pnpm-store" 2>/dev/null || true
           echo "zip entries: $(find "$DEPLOY" -type f | wc -l) (APK MAX=65535)"
           [ "$(find "$DEPLOY" -type f | wc -l)" -lt 50000 ] || { echo "::error::STRICT paperclip deploy still over zip budget"; exit 1; }
@@ -185,10 +201,11 @@ jobs:
         run: |
           set -euo pipefail
           ASSETS="android/app/src/main/assets/paperclip"
-          rm -rf "$ASSETS"; mkdir -p "$ASSETS"
+          rm -rf "$ASSETS" android/app/src/main/assets/9router; mkdir -p "$ASSETS"
           cp -a "$RUNNER_TEMP/pc-deploy"/. "$ASSETS"/
           echo "assets paperclip: $(du -sh "$ASSETS" | cut -f1) files=$(find "$ASSETS" -type f | wc -l)"
-          test -f "$ASSETS/dist/index.js" || { echo "FATAL: assets/paperclip/dist/index.js missing"; exit 1; }
+          test -f "$ASSETS/dist/index.js" || { echo "FATAL: paperclip entry missing"; exit 1; }
+          test -f "$ASSETS/ui-dist/index.html" || { echo "FATAL: paperclip UI missing"; exit 1; }
 
       - name: Extract bionic node closure (NDK/Bionic arm64 ELF — fast path)
         if: inputs.build_node_from_source != 'true'
@@ -306,16 +323,15 @@ jobs:
           file "$RUNNER_TEMP/sea-host/node-bionic"; readelf -d "$RUNNER_TEMP/sea-host/node-bionic" | grep NEEDED || true
           echo "Node from source built via NDK -> Bionic"
 
-      - name: Cache SEA blob (Node 26, paperclip hash)
+      - name: Cache SEA blob (termux node, paperclip deploy hash)
         uses: actions/cache@v4
         with:
           path: |
             ${{ runner.temp }}/sea-prep.blob
             ${{ runner.temp }}/myapp
-          key: sea-paperclip-${{ hashFiles('_paperclip/server/dist/**/*.js') }}-node26
+          key: sea-paperclip-${{ hashFiles('_paperclip/server/dist/**/*.js', '_paperclip/server/package.json') }}-termux
           restore-keys: |
             sea-paperclip-
-            sea-
 
       - name: Generate SEA blob + inject into Bionic ELF -> myapp
         run: |
@@ -329,7 +345,7 @@ jobs:
           WORK="$RUNNER_TEMP/pc-deploy"
           cat > "$RUNNER_TEMP/sea-entry.js" <<'SEA_ENTRY'
           const fs = require("node:fs"); const path = require("node:path");
-          const candidates = ["./dist/index.js","./server/dist/index.js"];
+          const candidates = ["./dist/index.js","./paperclip/dist/index.js"];
           let entry=null; for(const c of candidates){ try{ const p=path.resolve(c); if(fs.existsSync(p)){entry=p;break} }catch{} }
           if(!entry){ console.error("SEA: no entry found", candidates.join(",")); process.exit(1) }
           console.log("SEA myapp ->", entry, "execPath=", process.execPath);
@@ -442,7 +458,7 @@ jobs:
       - name: Verify APK pre-flight (STRICT SEA — fail fast, no fallback)
         run: |
           set -euo pipefail
-          echo "=== assets/jniLibs preview ==="; ls -lh android/app/src/main/assets/ 2>&1 | head -30 || true; ls android/app/src/main/assets/node-libs 2>&1 | head -20 || true; ls -lh android/app/src/main/jniLibs/arm64-v8a/ 2>&1 | head -20 || true; echo "--- du ---"; du -sh android/app/src/main/assets/9router 2>&1 | head -5 || true; du -sh android/app/src/main/assets/node-libs 2>&1 | head -5 || true; du -sh android/app/src/main/jniLibs 2>&1 | head -5 || true; du -sh android/app/src/main/assets 2>&1 | head -5 || true
+          echo "=== assets/jniLibs preview ==="; ls -lh android/app/src/main/assets/ 2>&1 | head -30 || true; ls android/app/src/main/assets/node-libs 2>&1 | head -20 || true; ls -lh android/app/src/main/jniLibs/arm64-v8a/ 2>&1 | head -20 || true; echo "--- du ---"; du -sh android/app/src/main/assets/paperclip 2>&1 | head -5 || true; du -sh android/app/src/main/assets/node-libs 2>&1 | head -5 || true; du -sh android/app/src/main/jniLibs 2>&1 | head -5 || true; du -sh android/app/src/main/assets 2>&1 | head -5 || true
           test -f android/app/src/main/jniLibs/arm64-v8a/libmyapp.so || { echo "::error::STRICT: jniLibs libmyapp.so missing (SEA build failed)"; exit 1; }
           file android/app/src/main/jniLibs/arm64-v8a/libmyapp.so 2>&1 | head -5 || true
           if ! file android/app/src/main/jniLibs/arm64-v8a/libmyapp.so | grep -qi "aarch64"; then echo "::error::myapp is not AArch64 ELF"; exit 1; fi
@@ -456,9 +472,9 @@ jobs:
           if [ -n "${{ inputs.app_version_name }}" ]; then GRADLE_APP_ARGS+=("-PAPP_VERSION_NAME=${{ inputs.app_version_name }}"); fi
           if [ -n "${{ inputs.app_version_code }}" ]; then GRADLE_APP_ARGS+=("-PAPP_VERSION_CODE=${{ inputs.app_version_code }}"); fi
           if [ -n "${{ inputs.router_port }}" ]; then GRADLE_APP_ARGS+=("-PROUTER_PORT=${{ inputs.router_port }}"); echo "ROUTER_PORT=${{ inputs.router_port }}"; fi
+          if [ -n "${{ inputs.project }}" ]; then GRADLE_APP_ARGS+=("-PPROJECT=${{ inputs.project }}"); echo "PROJECT=${{ inputs.project }}"; fi
           if [ -n "${{ inputs.peer_app_ids }}" ]; then GRADLE_APP_ARGS+=("-PPEER_APP_IDS=${{ inputs.peer_app_ids }}"); fi
           if [ -n "${{ inputs.mesh_coordinator_url }}" ]; then GRADLE_APP_ARGS+=("-PMESH_COORDINATOR_URL=${{ inputs.mesh_coordinator_url }}"); fi
-          GRADLE_APP_ARGS+=("-PPROJECT=${{ inputs.project || 'paperclip' }}"); echo "PROJECT=${{ inputs.project || 'paperclip' }}"
           echo "GRADLE_APP_ARGS=${GRADLE_APP_ARGS[*]}"
           cd android
           chmod +x gradlew
@@ -502,9 +518,9 @@ jobs:
           (unzip -l "$APK" | grep -E "assets/paperclip|assets/headroom|assets/node-libs|lib/arm64-v8a/libmyapp|classes" | head -80 || true)
           if ! unzip -l "$APK" | grep -q "lib/arm64-v8a/libmyapp.so"; then echo "::error::STRICT: lib/arm64-v8a/libmyapp.so missing in APK (SEA injection failed)"; exit 1; fi
           if unzip -l "$APK" | grep -q "assets/node-bionic"; then echo "::notice::legacy assets/node-bionic still in APK (ignored at runtime)"; fi
-          if ! unzip -l "$APK" | grep -q "assets/paperclip/dist/index.js"; then echo "::error::assets/paperclip/dist/index.js entry missing"; exit 1; fi
-          if ! unzip -l "$APK" | grep -q "assets/paperclip/ui-dist/index.html"; then echo "::error::assets/paperclip/ui-dist/index.html missing"; exit 1; fi
-          echo "paperclip entry+ui check ok (bake_models n/a for paperclip)"
+          if ! unzip -l "$APK" | grep -q "assets/paperclip/dist/index.js"; then echo "::error::assets/paperclip entry missing"; exit 1; fi
+          if ! unzip -l "$APK" | grep -q "assets/paperclip/ui-dist/index.html"; then echo "::error::assets/paperclip UI missing"; exit 1; fi
+          if unzip -l "$APK" | grep -q "assets/9router/"; then echo "::error::stale assets/9router leaked into lab2 APK"; exit 1; fi
           if ! unzip -l "$APK" | grep -q "assets/headroom/python/bin/python3"; then echo "::error::STRICT python prebuilt failed: assets/headroom/python/bin/python3 missing in APK"; exit 1; else echo "python prebuilt in APK ok"; fi
           if unzip -p "$APK" "lib/arm64-v8a/libmyapp.so" > /tmp/_apk_myapp 2>/dev/null && [ -s /tmp/_apk_myapp ]; then echo "myapp in APK:"; file /tmp/_apk_myapp | head -5 || true; readelf -h /tmp/_apk_myapp 2>&1 | head -10 || true; if ! file /tmp/_apk_myapp | grep -qi "aarch64"; then echo "::error::myapp in APK is not AArch64 ELF"; exit 1; fi; fi
           du -sh "$APK"
@@ -513,7 +529,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Paperclip-${{ inputs.app_id || 'lab2' }}-${{ inputs.build_type || 'release' }}-apk
+          name: Paperclip-${{ inputs.app_id || 'lab2' }}-${{ inputs.build_type || 'debug' }}-apk-SEA
           path: android/${{ env.APK }}
           if-no-files-found: error
           retention-days: 30
