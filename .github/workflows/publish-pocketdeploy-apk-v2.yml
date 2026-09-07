@@ -455,67 +455,6 @@ jobs:
           fi
           echo "myapp staged: assets/myapp + jniLibs/libmyapp.so $(du -sh android/app/src/main/jniLibs/arm64-v8a/libmyapp.so | cut -f1)"
 
-      - name: Bundle headroom (proxy+code + Kompress-v2 ml model, latest, baked offline)
-        if: false  # DISABLED: headroom start/stop owned by 9router; App only prebuilds python (user pip installs headroom)
-        run: |
-          set -euo pipefail
-          python3 -m pip install -U pip wheel --quiet
-          python3 -m pip wheel --no-cache-dir --only-binary=:all: -w "$RUNNER_TEMP/headroom-wheels" "headroom-ai[proxy,code]" 2>&1 | tail -20
-          ls -lh "$RUNNER_TEMP/headroom-wheels" | head -30 || true
-          echo "headroom wheels: $(ls "$RUNNER_TEMP/headroom-wheels" | wc -l) files"
-          
-          # Full Bake: Pre-download Kompress-v2-base if bake_models is true
-          ASSET_HR="android/app/src/main/assets/headroom"
-          rm -rf "$ASSET_HR"; mkdir -p "$ASSET_HR/wheels" "$ASSET_HR/models"
-          cp -a "$RUNNER_TEMP/headroom-wheels"/* "$ASSET_HR/wheels"/ 2>/dev/null || true
-
-          if [ "${{ inputs.bake_models }}" = "true" ]; then
-            echo "bake_models: download kompress-v2-base model..."
-            python3 -m pip install -q huggingface_hub 2>&1 | tail -5
-            export HF_ROOT="$RUNNER_TEMP/hf-headroom"
-            mkdir -p "$HF_ROOT"
-            HF_ROOT="$HF_ROOT" python3 <<'PY'
-          from huggingface_hub import snapshot_download
-          import os
-          repo="chopratejas/kompress-v2-base"
-          dst=os.path.join(os.environ["HF_ROOT"], "kompress-v2-base")
-          snapshot_download(repo_id=repo, local_dir=dst, tqdm_class=None)
-          print("hf snapshot done", dst)
-          import pathlib; print("model files:", len(list(pathlib.Path(dst).rglob("*"))))
-          PY
-            du -sh "$HF_ROOT/kompress-v2-base" 2>&1 | head -5 || true
-            cp -a "$HF_ROOT/kompress-v2-base" "$ASSET_HR/models"/ 2>/dev/null || true
-            echo "headroom models baked: $(du -sh "$ASSET_HR/models" | cut -f1)"
-          else
-            echo "skip headroom kompress model download"
-          fi
-          echo "headroom staged: total=$(du -sh "$ASSET_HR" | cut -f1) files=$(find "$ASSET_HR" -type f | wc -l)"
-
-      - name: Bundle python Bionic closure for Headroom (self-contained, no system python)
-        run: |
-          set -euo pipefail
-          echo "=== Bundling Termux python Bionic closure for Headroom ==="
-          PY_TMP="$RUNNER_TEMP/termux-python-headroom"; rm -rf "$PY_TMP"; mkdir -p "$PY_TMP/agg"
-          PKGINDEX="$PY_TMP/Packages"
-          curl -fsSL https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages -o "$PKGINDEX"
-          py_pkg_file() {
-            awk -v RS= -v FS='\n' -v pkg="$1" '$1 == ("Package: " pkg) { for(i=1;i<=NF;i++) if($i ~ /^Filename:/){ sub(/^Filename: /,"",$i); print $i; exit } }' "$PKGINDEX"
-          }
-          py_expand_deb() { local deb="$1" dest="$2"; local tmp; tmp=$(mktemp -d); (cd "$tmp" && ar x "$deb" && tar -xf data.tar.* -C "$dest"); rm -rf "$tmp"; }
-          for pkg in python openssl libffi readline libsqlite zlib libicu libc++ libandroid-shmem; do F=$(py_pkg_file "$pkg" || true); [ -z "$F" ] && { echo "::error::STRICT python prebuilt failed: pkg $pkg not found in Termux index"; exit 1; }; echo "fetch python-dep $pkg -> $F"; curl -fsSL "https://packages.termux.dev/apt/termux-main/$F" -o "$PY_TMP/$pkg.deb" || { echo "::error::STRICT python prebuilt failed: fetch $pkg failed"; exit 1; }; mkdir -p "$PY_TMP/libs/$pkg"; py_expand_deb "$PY_TMP/$pkg.deb" "$PY_TMP/libs/$pkg"; done
-          # NOTE: no separate `libpython` deb in termux-main (lib ships inside `python` deb) — verified below instead of fetched
-          PY_DEST="android/app/src/main/assets/headroom/python"; rm -rf "$PY_DEST"; mkdir -p "$PY_DEST"
-          if [ -d "$PY_TMP/libs/python/data/data/com.termux/files/usr" ]; then cp -a "$PY_TMP/libs/python/data/data/com.termux/files/usr/." "$PY_DEST"/; echo "python usr staged"; else echo "::error::STRICT python prebuilt failed: termux usr tree missing"; exit 1; fi
-          for d in "$PY_TMP/libs"/*; do [ -d "$d" ] || continue; find "$d" -type f -name "*.so*" | while read -r so; do cp -n "$so" "$PY_DEST/lib"/ 2>/dev/null || (mkdir -p "$PY_DEST/lib" && cp -n "$so" "$PY_DEST/lib"/); done; done
-          find "$PY_DEST" -type f -name "python3*" | xargs chmod +x 2>/dev/null || true
-          echo "python closure staged: $(du -sh "$PY_DEST" | cut -f1) files=$(find "$PY_DEST" -type f | wc -l)"
-          ls "$PY_DEST/bin" 2>/dev/null | head -20 || { echo "::error::STRICT python prebuilt failed: $PY_DEST/bin missing"; exit 1; }; ls "$PY_DEST/lib" 2>/dev/null | head -20 || true
-          test -x "$PY_DEST/bin/python3" || { echo "::error::STRICT python prebuilt failed: $PY_DEST/bin/python3 missing/not executable"; ls -R "$PY_DEST" | head -50; exit 1; }
-          file -L "$PY_DEST/bin/python3" | tee /tmp/pyfile || true
-          file -L "$PY_DEST/bin/python3" | grep -qi "aarch64" || { echo "::error::STRICT python prebuilt failed: bin/python3 is not AArch64 ELF"; exit 1; }
-          find "$PY_DEST" -name "libpython*.so*" | grep -q . || { echo "::error::STRICT python prebuilt failed: libpython .so missing in closure"; exit 1; }
-          echo "STRICT python prebuilt ok: $(du -sh "$PY_DEST" | cut -f1) files=$(find "$PY_DEST" -type f | wc -l)"
-
       - name: Verify APK pre-flight (STRICT SEA — fail fast, no fallback)
         run: |
           set -euo pipefail
@@ -575,12 +514,11 @@ jobs:
           set -euo pipefail
           APK="android/${{ env.APK }}"
           echo "=== APK contents (assets/jniLibs) ==="
-          (unzip -l "$APK" | grep -E "assets/9router|assets/headroom|assets/node-libs|lib/arm64-v8a/libmyapp|classes" | head -80 || true)
+          (unzip -l "$APK" | grep -E "assets/9router|assets/node-libs|lib/arm64-v8a/libmyapp|classes" | head -80 || true)
           if ! unzip -l "$APK" | grep -q "lib/arm64-v8a/libmyapp.so"; then echo "::error::STRICT: lib/arm64-v8a/libmyapp.so missing in APK (SEA injection failed)"; exit 1; fi
           if unzip -l "$APK" | grep -q "assets/node-bionic"; then echo "::notice::legacy assets/node-bionic still in APK (ignored at runtime)"; fi
           if ! unzip -l "$APK" | grep -q "assets/9router/server.js\|assets/9router/custom-server.js"; then echo "::error::assets/9router entry missing"; exit 1; fi
           if [ "${{ inputs.bake_models }}" = "true" ] && ! unzip -l "$APK" | grep -q "assets/9router/engine-models"; then echo "::error::STRICT: engine-models not baked (offline llmlingua missing)"; exit 1; else echo "engine-models check ok"; fi
-          if ! unzip -l "$APK" | grep -q "assets/headroom/python/bin/python3"; then echo "::error::STRICT python prebuilt failed: assets/headroom/python/bin/python3 missing in APK"; exit 1; else echo "python prebuilt in APK ok"; fi
           if unzip -p "$APK" "lib/arm64-v8a/libmyapp.so" > /tmp/_apk_myapp 2>/dev/null && [ -s /tmp/_apk_myapp ]; then echo "myapp in APK:"; file /tmp/_apk_myapp | head -5 || true; readelf -h /tmp/_apk_myapp 2>&1 | head -10 || true; if ! file /tmp/_apk_myapp | grep -qi "aarch64"; then echo "::error::myapp in APK is not AArch64 ELF"; exit 1; fi; fi
           du -sh "$APK"
           if [ -n "${{ env.AAB }}" ]; then echo "AAB: $AAB"; ls -lh "$AAB" 2>&1 | head -5 || true; du -sh "$AAB" 2>&1 | head -5 || true; fi
