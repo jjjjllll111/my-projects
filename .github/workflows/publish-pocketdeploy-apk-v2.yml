@@ -481,13 +481,17 @@ jobs:
           if [ "${{ inputs.build_type }}" = "release" ]; then
             ./gradlew :app:assembleRelease --stacktrace "${GRADLE_APP_ARGS[@]}"
             APK="app/build/outputs/apk/release/app-release-unsigned.apk"
-            KEYSTORE="$RUNNER_TEMP/ci-release.keystore"
-            keytool -genkeypair -v -keystore "$KEYSTORE" -alias pocketdeploy -keyalg RSA -keysize 2048 -validity 10000 -storepass pocketdeploy -keypass pocketdeploy -dname "CN=PocketDeploy, OU=CI, O=PocketDeploy, L=Local, ST=Local, C=CN"
+            # Stable CI-test identity from the skeleton repo
+            # (android/ci-release.keystore, same role as RN debug.keystore):
+            # consecutive builds stay update-installable; a fresh keypair
+            # per run changes the signature and breaks updates.
+            KEYSTORE="ci-release.keystore"
+            test -f "$KEYSTORE" || { echo "::error::missing $KEYSTORE"; exit 1; }
             SIGNED_APK="app/build/outputs/apk/release/app-release-signed.apk"
             APK_SIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
             test -x "$APK_SIGNER" || APK_SIGNER="$ANDROID_HOME/build-tools/34.0.0/apksigner"
             test -x "$APK_SIGNER" || APK_SIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | head -1)"
-            "$APK_SIGNER" sign --ks "$KEYSTORE" --ks-pass pass:pocketdeploy --key-pass pass:pocketdeploy --out "$SIGNED_APK" "$APK"
+            "$APK_SIGNER" sign --ks "$KEYSTORE" --ks-type PKCS12 --ks-pass pass:pocketdeploy --key-pass pass:pocketdeploy --out "$SIGNED_APK" "$APK"
             APK="$SIGNED_APK"
           else
             ./gradlew :app:assembleDebug --stacktrace "${GRADLE_APP_ARGS[@]}"
