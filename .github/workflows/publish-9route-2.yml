@@ -65,7 +65,7 @@ concurrency:
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
     env:
       NODE_OPTIONS: --max-old-space-size=12288
       NEXT_TELEMETRY_DISABLED: "1"
@@ -89,6 +89,12 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
 
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: freebuff-proxy/go.sum
+
       - name: Install root dependencies
         run: |
           set -euo pipefail
@@ -108,6 +114,13 @@ jobs:
           cd cli
           npm run build
           echo "✓ CLI build completed"
+
+      - name: Build freebuff Go binary
+        run: |
+          set -euo pipefail
+          FREEBUFF_STRICT=1 node scripts/build-freebuff.mjs
+          test -x cli/app/bin/freebuff-proxy || test -f cli/app/bin/freebuff-proxy.exe
+          echo "✓ freebuff binary build and bundle verified"
 
       - name: Verify Upstash/Qdrant memory artifacts bundled
         run: |
@@ -459,6 +472,10 @@ jobs:
             echo "ERROR: cli/app/ directory not created"
             exit 1
           fi
+          if [ ! -x "cli/app/bin/freebuff-proxy" ] && [ ! -f "cli/app/bin/freebuff-proxy.exe" ]; then
+            echo "::error::Missing freebuff binary: cli/app/bin/freebuff-proxy(.exe)"
+            exit 1
+          fi
           echo "✓ Build verification successful"
           echo "cli/app/ size: $(du -sh cli/app/ | cut -f1)"
           echo "file count    : $(find cli/app -type f | wc -l)"
@@ -479,6 +496,10 @@ jobs:
             [ -e "$f" ] && FILES="$FILES $f"
           done
           echo "Packing:$FILES"
+          if [ ! -x "app/bin/freebuff-proxy" ] && [ ! -f "app/bin/freebuff-proxy.exe" ]; then
+            echo "::error::Missing freebuff binary in archive source: app/bin/freebuff-proxy(.exe)"
+            exit 1
+          fi
           # Guard: onnxruntime-node was already excluded from bundle — verify not re-added
           if [ -d "app/node_modules/onnxruntime-node" ]; then echo "::warning::onnxruntime-node still in app (should be baked separately)"; ls -lh app/node_modules/onnxruntime-node | head -5; fi
           du -sh app 2>/dev/null || true
