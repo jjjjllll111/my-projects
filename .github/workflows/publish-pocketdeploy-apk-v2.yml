@@ -198,7 +198,8 @@ jobs:
         run: |
           set -euo pipefail
           cd _9router
-          npm run build
+          # PocketDeploy APK: skip freebuff Go module (Android runs Node only, no Go binary needed)
+          npx next build --webpack
           node scripts/copy-standalone-assets.mjs
           test -f .next/standalone/server.js || test -f .next/standalone/custom-server.js || { echo "FATAL: standalone entry missing"; ls -R .next/standalone | head -40 || true; exit 1; }
 
