@@ -30,6 +30,14 @@
 #       baseline and AFTER pruning; any spec regressing pass->fail aborts.
 #       (Without this, fail-open engines would silently degrade AND trigger a
 #        surprise background `npm install` on end-user machines.)
+#     - RTK Rust sidecar (open-sse/services/compression/rtk-sidecar):
+#       `cargo test --release` must pass; release binary is NDJSON smoke-tested
+#       (`{"ok":true}` round-trip) and verified executable under cli/app at the
+#       exact in-tree path the Node resolver walks to. Intermediate target/
+#       dirs are pruned to the single binary so the wholesale open-sse copy in
+#       the CLI build carries it without hundreds of MB of fingerprints/rlibs.
+#       Missing/broken binary aborts (RTK_STRICT=1); at runtime the Node inline
+#       path still covers if the binary is ever absent on end-user machines.
 #
 #   NOTE on esbuild/Rolldown/SWC: Next already compiles with native SWC on the
 #   runner and the MITM server is esbuild-bundled by buildMitm.js. Single-file
@@ -95,6 +103,15 @@ jobs:
           go-version: "1.26"
           cache-dependency-path: freebuff-proxy/go.sum
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build (rtk-sidecar target dir)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: open-sse/services/compression/rtk-sidecar
+          cache-provider: github
+
       - name: Install root dependencies
         run: |
           set -euo pipefail
@@ -108,6 +125,36 @@ jobs:
         run: |
           cd cli
           npm install --no-audit --no-fund
+
+      # ---- RTK Rust sidecar: must run BEFORE "Build CLI" because the CLI
+      # ---- build copies open-sse/ wholesale into cli/app (step 7c) — the
+      # ---- release binary has to exist in-tree first. Intermediate target/
+      # ---- dirs are pruned to the single binary so the archive stays lean.
+      - name: Build RTK sidecar binary
+        run: |
+          set -euo pipefail
+          RTK_STRICT=1 node scripts/build-rtk-sidecar.mjs
+          RTK_BIN="open-sse/services/compression/rtk-sidecar/target/release/rtk-sidecar"
+          test -x "$RTK_BIN"
+          echo "✓ rtk-sidecar binary built: $(du -h "$RTK_BIN" | cut -f1)"
+          # NDJSON smoke: empty filter round-trips with ok:true
+          printf '%s\n' '{"id":1,"text":"hello","filter":{"id":"smoke"}}' | "$RTK_BIN" | grep -q '"ok":true'
+          echo "✓ rtk-sidecar NDJSON smoke passed"
+          # Prune intermediates, keep only the binary for the wholesale copy
+          KEEP_DIR=$(mktemp -d)
+          cp "$RTK_BIN" "$KEEP_DIR/rtk-sidecar"
+          rm -rf open-sse/services/compression/rtk-sidecar/target
+          mkdir -p "$(dirname "$RTK_BIN")"
+          cp "$KEEP_DIR/rtk-sidecar" "$RTK_BIN"
+          chmod +x "$RTK_BIN"
+          rm -rf "$KEEP_DIR"
+          echo "✓ rtk-sidecar target pruned to binary only"
+
+      - name: Test RTK sidecar (cargo)
+        run: |
+          set -euo pipefail
+          cargo test --release --manifest-path open-sse/services/compression/rtk-sidecar/Cargo.toml
+          echo "✓ rtk-sidecar cargo tests passed"
 
       - name: Build CLI
         run: |
@@ -476,6 +523,10 @@ jobs:
             echo "::error::Missing freebuff binary: cli/app/bin/freebuff-proxy(.exe)"
             exit 1
           fi
+          if [ ! -x "cli/app/open-sse/services/compression/rtk-sidecar/target/release/rtk-sidecar" ]; then
+            echo "::error::Missing rtk-sidecar binary: cli/app/open-sse/services/compression/rtk-sidecar/target/release/rtk-sidecar"
+            exit 1
+          fi
           echo "✓ Build verification successful"
           echo "cli/app/ size: $(du -sh cli/app/ | cut -f1)"
           echo "file count    : $(find cli/app -type f | wc -l)"
@@ -498,6 +549,10 @@ jobs:
           echo "Packing:$FILES"
           if [ ! -x "app/bin/freebuff-proxy" ] && [ ! -f "app/bin/freebuff-proxy.exe" ]; then
             echo "::error::Missing freebuff binary in archive source: app/bin/freebuff-proxy(.exe)"
+            exit 1
+          fi
+          if [ ! -x "app/open-sse/services/compression/rtk-sidecar/target/release/rtk-sidecar" ]; then
+            echo "::error::Missing rtk-sidecar binary in archive source: app/open-sse/services/compression/rtk-sidecar/target/release/rtk-sidecar"
             exit 1
           fi
           # Guard: onnxruntime-node was already excluded from bundle — verify not re-added
