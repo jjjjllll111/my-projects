@@ -71,9 +71,63 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Windows RTK sidecar: the main (linux) job only produces the ELF binary.
+  # Node's resolver expects `rtk-sidecar.exe` on win32, so a dedicated
+  # windows-latest job builds it and uploads it as an artifact; the main job
+  # downloads it into the exact in-tree path before the CLI packaging step.
+  build-rtk-sidecar-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - name: Checkout 9router from private repository
+        uses: actions/checkout@v4
+        with:
+          repository: jjjjllll111/9router-private
+          ref: ${{ inputs.ref || 'master' }}
+          token: ${{ secrets.GH_PAT }}
+          fetch-depth: 1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build (rtk-sidecar target dir)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: open-sse/services/compression/rtk-sidecar
+          cache-provider: github
+
+      - name: Build RTK sidecar (windows exe)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:RTK_STRICT = "1"
+          node scripts/build-rtk-sidecar.mjs
+          $RTK_BIN = "open-sse/services/compression/rtk-sidecar/target/release/rtk-sidecar.exe"
+          if (-not (Test-Path $RTK_BIN)) { Write-Error "::error::Missing rtk-sidecar.exe: $RTK_BIN"; exit 1 }
+          Write-Output "rtk-sidecar.exe built: $((Get-Item $RTK_BIN).Length / 1MB) MB"
+          # NDJSON smoke: empty filter round-trips with ok:true
+          $smoke = '{"id":1,"text":"hello","filter":{"id":"smoke"}}'
+          $out = $smoke | & $RTK_BIN | Out-String
+          if ($out -notmatch '"ok":true') { Write-Error "::error::NDJSON smoke failed: $out"; exit 1 }
+          Write-Output "rtk-sidecar NDJSON smoke passed"
+
+      - name: Test RTK sidecar (cargo)
+        run: cargo test --release --manifest-path open-sse/services/compression/rtk-sidecar/Cargo.toml
+
+      - name: Upload windows exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtk-sidecar-windows
+          path: open-sse/services/compression/rtk-sidecar/target/release/rtk-sidecar.exe
+          if-no-files-found: error
+          retention-days: 1
+
   build-and-release:
     runs-on: ubuntu-latest
     timeout-minutes: 50
+    needs: build-rtk-sidecar-windows
     env:
       NODE_OPTIONS: --max-old-space-size=12288
       NEXT_TELEMETRY_DISABLED: "1"
@@ -155,6 +209,21 @@ jobs:
           set -euo pipefail
           cargo test --release --manifest-path open-sse/services/compression/rtk-sidecar/Cargo.toml
           echo "✓ rtk-sidecar cargo tests passed"
+
+      - name: Download windows rtk-sidecar.exe
+        uses: actions/download-artifact@v4
+        with:
+          name: rtk-sidecar-windows
+          path: open-sse/services/compression/rtk-sidecar/target/release/
+
+      - name: Verify windows exe present
+        run: |
+          set -euo pipefail
+          RTK_EXE="open-sse/services/compression/rtk-sidecar/target/release/rtk-sidecar.exe"
+          test -f "$RTK_EXE" || { echo "::error::Missing windows artifact: $RTK_EXE"; exit 1; }
+          echo "✓ rtk-sidecar.exe present: $(du -h "$RTK_EXE" | cut -f1)"
+          # Keep it executable-flagged so the wholesale copy preserves it
+          chmod +x "$RTK_EXE"
 
       - name: Build CLI
         run: |
@@ -527,6 +596,10 @@ jobs:
             echo "::error::Missing rtk-sidecar binary: cli/app/open-sse/services/compression/rtk-sidecar/target/release/rtk-sidecar"
             exit 1
           fi
+          if [ ! -f "cli/app/open-sse/services/compression/rtk-sidecar/target/release/rtk-sidecar.exe" ]; then
+            echo "::error::Missing rtk-sidecar.exe (windows): cli/app/open-sse/services/compression/rtk-sidecar/target/release/rtk-sidecar.exe"
+            exit 1
+          fi
           echo "✓ Build verification successful"
           echo "cli/app/ size: $(du -sh cli/app/ | cut -f1)"
           echo "file count    : $(find cli/app -type f | wc -l)"
@@ -553,6 +626,10 @@ jobs:
           fi
           if [ ! -x "app/open-sse/services/compression/rtk-sidecar/target/release/rtk-sidecar" ]; then
             echo "::error::Missing rtk-sidecar binary in archive source: app/open-sse/services/compression/rtk-sidecar/target/release/rtk-sidecar"
+            exit 1
+          fi
+          if [ ! -f "app/open-sse/services/compression/rtk-sidecar/target/release/rtk-sidecar.exe" ]; then
+            echo "::error::Missing rtk-sidecar.exe in archive source: app/open-sse/services/compression/rtk-sidecar/target/release/rtk-sidecar.exe"
             exit 1
           fi
           # Guard: onnxruntime-node was already excluded from bundle — verify not re-added
