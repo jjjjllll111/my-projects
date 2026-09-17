@@ -657,11 +657,30 @@ jobs:
           echo "uncompressed bytes: $(tar tzf 9router-cli.tar.gz 2>&1 | head -1 || true)"
 
       - name: Upload to GitHub Release
+        timeout-minutes: 15
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
+          set -euo pipefail
           TAG=${{ inputs.release_tag || 'cli-latest-opt' }}
           REPO=jjjjllll111/9router-private
+
+          # Size guard: abort loudly instead of hanging on a bloated archive.
+          # Healthy archive is ~1-2 GiB; anything over 3 GiB means the bundle
+          # step regressed and must be fixed, not uploaded for 30+ minutes.
+          ARCHIVE_BYTES=$(stat -c%s 9router-cli.tar.gz)
+          echo "archive: 9router-cli.tar.gz ($ARCHIVE_BYTES bytes)"
+          if [ "$ARCHIVE_BYTES" -gt 3221225472 ]; then
+            echo "::error::archive too large ($ARCHIVE_BYTES bytes > 3 GiB) — refusing to upload; fix the bundle step"
+            exit 1
+          fi
+
+          # Auth preflight: fail fast on dead/expired GH_PAT instead of hanging
+          # the uploader on 401s (observed as silent Upload stalls).
+          gh auth status --hostname github.com || {
+            echo "::error::GH_PAT auth preflight failed — check secret expiry/scope (repo)"
+            exit 1
+          }
 
           # Create or verify release exists
           gh release view $TAG --repo $REPO || \
@@ -669,7 +688,19 @@ jobs:
               --title "9Router CLI Latest (Optimized)" \
               --notes "Auto-build from ${{ inputs.ref || 'master' }} branch — optimized packaging: pruned dev-junk/source-maps, minified bootstraps, identical engine deps + baked models."
 
-          # Upload and overwrite existing archive
-          gh release upload $TAG 9router-cli.tar.gz --repo $REPO --clobber
+          # Upload with retry + hard per-attempt timeout: a stalled TCP
+          # connection must fail the attempt (then retry), never hang the job
+          # until the 50-minute job timeout.
+          ok=0
+          for attempt in 1 2 3; do
+            echo "::notice::upload attempt $attempt/3"
+            if timeout 600 gh release upload $TAG 9router-cli.tar.gz --repo $REPO --clobber; then
+              ok=1
+              break
+            fi
+            echo "::warning::upload attempt $attempt failed or timed out (10 min cap)"
+            sleep 10
+          done
+          [ "$ok" = "1" ] || { echo "::error::upload failed after 3 attempts"; exit 1; }
 
           echo "✓ Release updated successfully at https://github.com/$REPO/releases/tag/$TAG"
