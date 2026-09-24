@@ -164,6 +164,14 @@ function buildCliPackage() {
     console.log(`✅ Version already synced: ${cliPkg.version}\n`);
   }
 
+  // Step 0b: Wipe the previous dist dir. Next.js reuses an existing distDir and its
+  // output-tracing cache, so a stale tree survives `next build` and gets copied into
+  // cli/app alongside freshly compiled chunks — shipping a src/ that no longer matches
+  // the bundle it runs (observed: 24-day-old src next to a current build).
+  console.log("0️⃣b  Cleaning stale dist dir...");
+  fs.rmSync(buildDistDir, { recursive: true, force: true });
+  console.log(`✅ Cleaned ${buildDistDirName}\n`);
+
   // Step 1: Build app with Next.js (workspace tracing root → traced node_modules in standalone).
   console.log("1️⃣  Building Next.js app...");
   try {
