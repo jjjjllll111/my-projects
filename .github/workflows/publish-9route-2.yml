@@ -25,11 +25,22 @@
 #   Integrity guardrails (fail the build instead of shipping a broken artifact)
 #     - bundle-engine-deps.mjs still runs with --strict (missing entry pkg = fail)
 #     - preload-engine-models.mjs still bakes tinybert + bert-base weights
-#     - import smoke test over the exact 8 runtime specifiers used by
-#       open-sse/services/compression/optionalDeps.js — run BEFORE pruning as a
-#       baseline and AFTER pruning; any spec regressing pass->fail aborts.
+#     - import smoke test over every runtime specifier reached through
+#       importOptional() — i.e. OPTIONAL_PACKAGE_GROUPS in
+#       open-sse/services/compression/optionalDeps.js plus its call sites —
+#       run BEFORE pruning as a baseline and AFTER pruning; any spec
+#       regressing pass->fail aborts.
 #       (Without this, fail-open engines would silently degrade AND trigger a
 #        surprise background `npm install` on end-user machines.)
+#       The list must stay in sync with the source. It previously omitted the
+#       `stealth` group (@llmtrim/js, header-generator, browserforge), which is
+#       what let a pruning regression on header-generator ship green and
+#       silently downgrade freebuff TLS stealth to plain Node TLS.
+#     - hard gate: the compiled server must contain the string `hindsightRemote`
+#       (an object property, so minification-safe). Catches a stale
+#       .next-cli-build, which otherwise ships green and degrades into
+#       silently-disabled memory extraction because resolveBackendSelector() is
+#       fail-open.
 #     - RTK Rust sidecar (open-sse/services/compression/rtk-sidecar):
 #       `cargo test --release` must pass; release binary is NDJSON smoke-tested
 #       (`{"ok":true}` round-trip) and verified executable under cli/app at the
@@ -238,7 +249,7 @@ jobs:
           test -x cli/app/bin/freebuff-proxy || test -f cli/app/bin/freebuff-proxy.exe
           echo "✓ freebuff binary build and bundle verified"
 
-      - name: Verify Upstash/Qdrant memory artifacts bundled
+      - name: Verify memory (Upstash/Qdrant/Hindsight) artifacts bundled
         run: |
           set -euo pipefail
           # Standalone must contain the new memory routes + clients (otherwise dashboard shows offline)
@@ -246,9 +257,14 @@ jobs:
             "cli/app/open-sse/services/memory/upstash.js" \
             "cli/app/open-sse/services/memory/qdrant.js" \
             "cli/app/open-sse/services/memory/vectorStore.js" \
+            "cli/app/open-sse/services/memory/hindsight.js" \
+            "cli/app/open-sse/services/memory/backendSelector.js" \
+            "cli/app/open-sse/services/memory/hindsightRuntime.js" \
             "cli/app/src/app/api/memory/qdrant-health/route.js" \
+            "cli/app/src/app/api/memory/hindsight/route.js" \
             "cli/app/src/app/(dashboard)/dashboard/memory/MemoryClient.js" \
             "cli/app/.next-cli-build/server/app/api/memory/qdrant-health/route.js" \
+            "cli/app/.next-cli-build/server/app/api/memory/hindsight/route.js" \
             "cli/app/.next-cli-build/server/app/api/settings/route.js"; do
             if [ ! -f "$f" ]; then
               echo "::error::Missing required bundled artifact: $f"
@@ -261,6 +277,21 @@ jobs:
           if ! grep -R "UPSTASH_VECTOR_REST_TOKEN" cli/app/.next-cli-build 2>/dev/null | grep -q "UPSTASH"; then
             echo "::warning::Compiled bundle does not contain UPSTASH_VECTOR_REST_TOKEN — stale build?"
           fi
+          # HARD gate for Hindsight. `hindsightRemote` is an object property, so it
+          # survives minification; a function name like describeEmbeddingEnv may be
+          # mangled and must NOT be used as the marker. This is the assertion that
+          # catches a stale .next-cli-build: without it a build predating the
+          # backendSelector fix ships green, and because resolveBackendSelector()
+          # is fail-open the failure mode is a ReferenceError swallowed into
+          # silently-disabled memory extraction rather than a visible error.
+          if ! grep -R "hindsightRemote" cli/app/.next-cli-build/server >/dev/null 2>&1; then
+            echo "::error::Bundle missing hindsightRemote — stale build?"
+            echo "--- grep provenance ---"
+            grep -c "hindsightRemote" cli/app/open-sse/services/memory/backendSelector.js || true
+            echo "(source has it but the compiled server does not => stale .next-cli-build)"
+            exit 1
+          fi
+          echo "✓ hindsightRemote present in compiled server"
           # Also ensure combo strategy fix is in bundle
           if ! grep -R "weighted-round-robin" cli/app 2>/dev/null | grep -q "weighted"; then
             echo "::warning::Bundle missing weighted-round-robin — is combo fix merged?"
@@ -272,7 +303,12 @@ jobs:
       - name: Ensure engine deps present (retry transient optional-install gaps)
         run: |
           set -euo pipefail
-          PKGS="@huggingface/transformers @atjsh/llmlingua-2 js-tiktoken omniglyph onnxruntime-node safe-regex smol-toml tls-client-node"
+          # Must stay in sync with OPTIONAL_PACKAGE_GROUPS in
+          # open-sse/services/compression/optionalDeps.js. header-generator and
+          # browserforge belong to the `stealth` group and are imported by
+          # open-sse/services/freebuff/stealth/tls.js — without them the freebuff
+          # TLS stealth silently degrades to plain Node TLS.
+          PKGS="@huggingface/transformers @atjsh/llmlingua-2 js-tiktoken omniglyph onnxruntime-node safe-regex smol-toml tls-client-node @llmtrim/js header-generator browserforge"
           MISSING=""
           for p in $PKGS; do [ -d "node_modules/$p" ] || MISSING="$MISSING $p"; done
           if [ -n "$MISSING" ]; then
@@ -320,7 +356,7 @@ jobs:
            *     pairing-checked *.map elsewhere under cli/app.
            *   - NEVER touches cli/app/engine-models/** (baked model weights).
            *   - NEVER deletes whole dependency packages — junk categories only.
-           *   - Verifies the exact 8 runtime engine specifiers BEFORE pruning
+           *   - Verifies every runtime engine specifier BEFORE pruning
            *     (baseline) and AFTER; pass->fail regression aborts (exit 3).
            */
           import fs from "node:fs";
@@ -333,7 +369,22 @@ jobs:
           const MODELS = path.join(APP, "engine-models");
           const MINIFY_BOOTSTRAP = process.env.OPT_MINIFY_BOOTSTRAP !== "0";
 
-          /** Exact specifiers open-sse/services/compression resolves at runtime. */
+          /**
+           * Every bare specifier resolved at runtime through importOptional().
+           *
+           * MUST stay in sync with OPTIONAL_PACKAGE_GROUPS in
+           * open-sse/services/compression/optionalDeps.js AND with the
+           * importOptional() call sites. This list is the ONLY thing that
+           * detects a pruning regression: prune runs before/after and a
+           * pass->fail aborts the build (exit 3).
+           *
+           * A spec missing from here fails OPEN and silent — the engine just
+           * no-ops, and the surprise background `npm install` on end-user
+           * machines is exactly that case. `header-generator` / `browserforge`
+           * were the gap: the prune pass deletes docs/, examples/, *.md and
+           * *.d.ts at any depth, so a broken header-generator shipped green and
+           * quietly downgraded freebuff TLS stealth to plain Node TLS.
+           */
           const ENGINE_SPECS = [
             "omniglyph",
             "omniglyph/applicability",
@@ -345,6 +396,9 @@ jobs:
             "safe-regex",
             "tls-client-node",
             "onnxruntime-node",
+            "@llmtrim/js",
+            "header-generator",
+            "browserforge",
           ];
 
           /** Dev-only directory names — deleted wherever they sit inside node_modules. */
