@@ -670,7 +670,14 @@ jobs:
           set -euo pipefail
           cd cli
           FILES=""
-          for f in app cli.js hooks src README.md LICENSE; do
+          # package.json and node_modules MUST ship at the archive root:
+          #   - cli.js runs `require("./package.json")` at startup to read pkg.name
+          #   - the launcher resolves its own runtime deps from ./node_modules
+          #     (node-machine-id via src/cli/api/client.js, plus enquirer,
+          #      node-forge, confbox, react/react-dom).
+          # Without either file/dir the extracted CLI dies immediately with
+          # MODULE_NOT_FOUND before the server can ever boot.
+          for f in app cli.js hooks src node_modules package.json README.md LICENSE; do
             [ -e "$f" ] && FILES="$FILES $f"
           done
           echo "Packing:$FILES"
@@ -709,6 +716,21 @@ jobs:
           tar tzf 9router-cli.tar.gz | tail -n 20 || true
           echo "total entries: $(tar tzf 9router-cli.tar.gz 2>&1 | wc -l || echo '?')"
           echo "uncompressed bytes: $(tar tzf 9router-cli.tar.gz 2>&1 | head -1 || true)"
+          # Hard gate: the extracted CLI must boot. cli.js loads ./package.json and
+          # requires its own deps from ./node_modules; a missing entry here means the
+          # release crashes with MODULE_NOT_FOUND on launch.
+          ARCHIVE_LIST=$(tar tzf 9router-cli.tar.gz)
+          for entry in package.json cli.js hooks/sqliteRuntime.js src/cli/api/client.js; do
+            if ! printf '%s\n' "$ARCHIVE_LIST" | grep -qx "$entry"; then
+              echo "::error::archive root missing $entry — extracted CLI would crash with MODULE_NOT_FOUND"
+              exit 1
+            fi
+          done
+          if ! printf '%s\n' "$ARCHIVE_LIST" | grep -q "^node_modules/node-machine-id/"; then
+            echo "::error::archive missing node_modules/node-machine-id — CLI crashes at startup"
+            exit 1
+          fi
+          echo "✓ archive carries package.json, cli.js and CLI runtime deps"
 
       - name: Upload to GitHub Release
         timeout-minutes: 15
