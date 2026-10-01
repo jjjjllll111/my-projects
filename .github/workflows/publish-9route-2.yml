@@ -719,14 +719,17 @@ jobs:
           # Hard gate: the extracted CLI must boot. cli.js loads ./package.json and
           # requires its own deps from ./node_modules; a missing entry here means the
           # release crashes with MODULE_NOT_FOUND on launch.
-          ARCHIVE_LIST=$(tar tzf 9router-cli.tar.gz)
+          # Dump the listing to a file first and grep the file: piping `tar tzf` into
+          # `grep -q` closes the pipe early, and with `set -o pipefail` that SIGPIPE
+          # fails the step even when the entry IS present.
+          tar tzf 9router-cli.tar.gz > "$RUNNER_TEMP/9router-cli.list"
           for entry in package.json cli.js hooks/sqliteRuntime.js src/cli/api/client.js; do
-            if ! printf '%s\n' "$ARCHIVE_LIST" | grep -qx "$entry"; then
+            if ! grep -qx "$entry" "$RUNNER_TEMP/9router-cli.list"; then
               echo "::error::archive root missing $entry — extracted CLI would crash with MODULE_NOT_FOUND"
               exit 1
             fi
           done
-          if ! printf '%s\n' "$ARCHIVE_LIST" | grep -q "^node_modules/node-machine-id/"; then
+          if ! grep -q "^node_modules/node-machine-id/" "$RUNNER_TEMP/9router-cli.list"; then
             echo "::error::archive missing node_modules/node-machine-id — CLI crashes at startup"
             exit 1
           fi
