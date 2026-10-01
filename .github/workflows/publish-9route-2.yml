@@ -242,6 +242,41 @@ jobs:
           npm run build
           echo "✓ CLI build completed"
 
+      - name: Ensure complete sql.js (wasm) bundled in cli/app
+        run: |
+          set -euo pipefail
+          # Next.js standalone output-tracing follows `require("sql.js")` and copies
+          # only dist/sql-wasm.js (plus package.json) — it CANNOT see the sibling
+          # dist/sql-wasm.wasm, which initSqlJs() reads from disk at runtime. Because
+          # that partial dir already exists, build-cli.js's ensureModuleInBundle()
+          # sees it and SKIPS its full-package copy. Result: the shipped CLI boots
+          # with NO SQLite driver (better-sqlite3 is intentionally not bundled — it
+          # self-heals into ~/.9router/runtime), so every DB-backed route and the
+          # freebuff token service fail while the HTTP server still answers 307.
+          # Force the complete sql.js in and verify hard before it reaches the archive.
+          DEST_DIR="cli/app/node_modules/sql.js"
+          DEST_WASM="$DEST_DIR/dist/sql-wasm.wasm"
+          if [ ! -f "$DEST_WASM" ]; then
+            SRC_DIR=""
+            for cand in node_modules/sql.js cli/node_modules/sql.js app/node_modules/sql.js; do
+              if [ -f "$cand/dist/sql-wasm.wasm" ]; then SRC_DIR="$cand"; break; fi
+            done
+            if [ -z "$SRC_DIR" ]; then
+              echo "::notice::sql.js with wasm absent from installed deps — installing on demand"
+              npm install --no-save --no-audit --no-fund sql.js@1.14.1
+              SRC_DIR="node_modules/sql.js"
+            fi
+            [ -f "$SRC_DIR/dist/sql-wasm.wasm" ] || { echo "::error::cannot locate sql.js/dist/sql-wasm.wasm to bundle"; exit 1; }
+            mkdir -p "$DEST_DIR/dist"
+            cp -r "$SRC_DIR/dist"/. "$DEST_DIR/dist"/
+            [ -f "$DEST_DIR/package.json" ] || cp "$SRC_DIR/package.json" "$DEST_DIR/package.json"
+            echo "✓ copied complete sql.js (dist) from $SRC_DIR"
+          fi
+          for f in "$DEST_DIR/dist/sql-wasm.js" "$DEST_WASM" "$DEST_DIR/package.json"; do
+            [ -f "$f" ] || { echo "::error::bundled sql.js incomplete: missing $f"; exit 1; }
+          done
+          echo "✓ sql.js SQLite fallback bundled (wasm $(du -h "$DEST_WASM" | cut -f1))"
+
       - name: Build freebuff Go binary
         run: |
           set -euo pipefail
@@ -723,9 +758,11 @@ jobs:
           # `grep -q` closes the pipe early, and with `set -o pipefail` that SIGPIPE
           # fails the step even when the entry IS present.
           tar tzf 9router-cli.tar.gz > "$RUNNER_TEMP/9router-cli.list"
-          for entry in package.json cli.js hooks/sqliteRuntime.js src/cli/api/client.js; do
+          for entry in package.json cli.js hooks/sqliteRuntime.js src/cli/api/client.js app/node_modules/sql.js/dist/sql-wasm.wasm; do
             if ! grep -qx "$entry" "$RUNNER_TEMP/9router-cli.list"; then
-              echo "::error::archive root missing $entry — extracted CLI would crash with MODULE_NOT_FOUND"
+              echo "::error::archive missing required entry $entry"
+              echo "       (package.json/cli.js/deps missing => MODULE_NOT_FOUND on launch;"
+              echo "        sql-wasm.wasm missing => CLI boots with no SQLite driver)"
               exit 1
             fi
           done
@@ -733,7 +770,10 @@ jobs:
             echo "::error::archive missing node_modules/node-machine-id — CLI crashes at startup"
             exit 1
           fi
-          echo "✓ archive carries package.json, cli.js and CLI runtime deps"
+          if ! grep -q "^app/node_modules/better-sqlite3/" "$RUNNER_TEMP/9router-cli.list"; then
+            echo "::notice::better-sqlite3 not bundled (expected) — sql.js wasm is the guaranteed SQLite fallback"
+          fi
+          echo "✓ archive carries package.json, cli.js, CLI runtime deps and the sql.js wasm"
 
       - name: Upload to GitHub Release
         timeout-minutes: 15
