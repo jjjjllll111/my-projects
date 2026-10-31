@@ -93,7 +93,7 @@ jobs:
       NEXT_TELEMETRY_DISABLED: "1"
     steps:
       - name: Checkout 9router from private repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: jjjjllll111/9router-private
           ref: ${{ inputs.ref || 'master' }}
@@ -128,7 +128,7 @@ jobs:
         run: cargo test --release --manifest-path open-sse/services/compression/rtk-sidecar/Cargo.toml
 
       - name: Upload windows exe artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rtk-sidecar-windows
           path: open-sse/services/compression/rtk-sidecar/target/release/rtk-sidecar.exe
@@ -148,7 +148,7 @@ jobs:
       NPM_CONFIG_PREFER_OFFLINE: "true"
     steps:
       - name: Checkout 9router from private repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: jjjjllll111/9router-private
           ref: ${{ inputs.ref || 'master' }}
@@ -156,14 +156,14 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 26
           cache: npm
           cache-dependency-path: package-lock.json
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: "1.26"
           cache-dependency-path: freebuff-proxy/go.sum
@@ -222,7 +222,7 @@ jobs:
           echo "✓ rtk-sidecar cargo tests passed"
 
       - name: Download windows rtk-sidecar.exe
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: rtk-sidecar-windows
           path: open-sse/services/compression/rtk-sidecar/target/release/
